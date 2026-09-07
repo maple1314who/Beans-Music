@@ -473,8 +473,29 @@ final class NetEaseAPI {
     }
 
     func like(id: Int, liked: Bool) async throws -> Bool {
-        let json = try await request("/api/song/like?t=\(liked)", payload: ["alg": "itembased", "trackId": id, "like": liked, "time": "3"], crypto: "weapi")
-        return (json["code"] as? Int) == 200
+        let time = String(Int(Date().timeIntervalSince1970 * 1000))
+        let payloads: [[String: Any]] = [
+            ["alg": "itembased", "trackId": id, "like": liked, "time": time],
+            ["trackId": id, "like": liked],
+            ["songId": id, "like": liked]
+        ]
+        var lastCode = -1
+        var lastError = ""
+        for payload in payloads {
+            do {
+                let json = try await request("/api/song/like?t=\(liked)", payload: payload, crypto: "weapi")
+                let code = json["code"] as? Int ?? -1
+                lastCode = code
+                if code == 200 {
+                    return true
+                }
+                lastError = json["message"] as? String ?? json["msg"] as? String ?? ""
+            } catch {
+                lastError = error.localizedDescription
+            }
+        }
+        BeansLogger.shared.log("网易云红心同步失败：id=\(id) liked=\(liked) code=\(lastCode) \(lastError)", level: .error)
+        return false
     }
 
     // MARK: - 发现
@@ -519,6 +540,24 @@ final class NetEaseAPI {
         return list.compactMap(Playlist.init(personalizedJSON:))
     }
 
+    func recommendResource() async throws -> [Playlist] {
+        let json = try await request("/api/v1/discovery/recommend/resource", payload: [:], crypto: "weapi")
+        let list = json["recommend"] as? [[String: Any]] ?? []
+        return list.compactMap(Playlist.init(json:))
+    }
+
+    func recommendedHomePlaylists(loggedIn: Bool, limit: Int = 18) async -> [Playlist] {
+        if loggedIn {
+            async let recommend = try? recommendResource()
+            async let personalized = try? personalizedPlaylists(limit: limit)
+            let head = await recommend ?? []
+            let tail = await personalized ?? []
+            var seen = Set<Int>()
+            return Array((head + tail).filter { seen.insert($0.id).inserted }.prefix(limit))
+        }
+        return (try? await personalizedPlaylists(limit: limit)) ?? []
+    }
+
     // MARK: - 更多发现
 
     func hotSearch() async throws -> [String] {
@@ -554,10 +593,43 @@ final class NetEaseAPI {
         return list.compactMap(Song.init(json:))
     }
 
-    func personalFM() async throws -> [Song] {
-        let json = try await request("/api/v1/radio/get", payload: [:], crypto: "weapi")
-        let list = json["data"] as? [[String: Any]] ?? []
-        return list.compactMap(Song.init(json:))
+    func intelligenceList(songID: Int, playlistID: Int, count: Int = 30) async throws -> [Song] {
+        let json = try await request(
+            "/api/playmode/intelligence/list",
+            payload: [
+                "songId": songID,
+                "type": "fromPlayOne",
+                "playlistId": playlistID,
+                "startMusicId": songID,
+                "count": count
+            ],
+            crypto: "weapi"
+        )
+        let data = json["data"] as? [[String: Any]] ?? []
+        return data.compactMap { item in
+            if let songInfo = item["songInfo"] as? [String: Any] {
+                return Song(json: songInfo)
+            }
+            return Song(json: item)
+        }
+    }
+
+    /// 网易云私人漫游：一次预取 30 首，避免只有 12 首时很快播放完。
+    func personalFM(limit: Int = 30) async throws -> [Song] {
+        var songs: [Song] = []
+        var seen = Set<String>()
+        let batchCount = max(1, Int(ceil(Double(limit) / 3.0)))
+        for _ in 0..<batchCount {
+            let json = try await request("/api/v1/radio/get", payload: [:], crypto: "weapi")
+            let list = json["data"] as? [[String: Any]] ?? []
+            let batch = list.compactMap(Song.init(json:))
+            for song in batch where seen.insert(song.identityKey).inserted {
+                songs.append(song)
+                if songs.count >= limit { return songs }
+            }
+            if batch.isEmpty { break }
+        }
+        return songs
     }
 
     // MARK: - 歌单编辑

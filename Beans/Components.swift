@@ -3,6 +3,14 @@ import CoreImage.CIFilterBuiltins
 
 // MARK: - 工具
 
+func beansSongCountText(_ count: Int) -> String {
+    beansLocalized("\(count) 首", "\(count) songs")
+}
+
+func beansLocalSongCountText(_ count: Int) -> String {
+    beansLocalized("\(count) 首 · 本机", "\(count) songs · On device")
+}
+
 func beansTimeString(_ seconds: Double) -> String {
     let total = max(0, Int(seconds))
     return String(format: "%d:%02d", total / 60, total % 60)
@@ -11,21 +19,43 @@ func beansTimeString(_ seconds: Double) -> String {
 // MARK: - 触感反馈（复用生成器实例，避免每次点击创建新对象造成额外开销/发热）
 
 enum BeansHaptics {
+    static let enabledKey = "beans.haptics.enabled"
+
     private static let lightImpact = UIImpactFeedbackGenerator(style: .light)
     private static let mediumImpact = UIImpactFeedbackGenerator(style: .medium)
     private static let notification = UINotificationFeedbackGenerator()
     private static let selection = UISelectionFeedbackGenerator()
 
+    private static var isEnabled: Bool {
+        UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? true
+    }
+
     static func prepare() {
+        guard isEnabled else { return }
         lightImpact.prepare()
         mediumImpact.prepare()
         selection.prepare()
     }
 
-    static func tap() { lightImpact.impactOccurred() }
-    static func medium() { mediumImpact.impactOccurred() }
-    static func success() { notification.notificationOccurred(.success) }
-    static func select() { selection.selectionChanged() }
+    static func tap() {
+        guard isEnabled else { return }
+        lightImpact.impactOccurred()
+    }
+
+    static func medium() {
+        guard isEnabled else { return }
+        mediumImpact.impactOccurred()
+    }
+
+    static func success() {
+        guard isEnabled else { return }
+        notification.notificationOccurred(.success)
+    }
+
+    static func select() {
+        guard isEnabled else { return }
+        selection.selectionChanged()
+    }
 }
 
 // MARK: - 按压动效
@@ -36,7 +66,8 @@ struct GlassPressButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? scale : 1)
-            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: configuration.isPressed)
+            .brightness(configuration.isPressed ? 0.025 : 0)
+            .animation(.spring(response: 0.24, dampingFraction: 0.82), value: configuration.isPressed)
     }
 }
 
@@ -45,14 +76,19 @@ struct GlassPressButtonStyle: ButtonStyle {
 struct GlassBackdrop: View {
     @EnvironmentObject private var theme: ThemeStore
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
     /// 自定义背景色（nil 使用默认氛围渐变）
     var customColor: Color? = nil
     /// 主页模式：即使“同步到全部页面”关闭，也始终显示壁纸/背景色（仅发现页传 true）
     var homeMode: Bool = false
+    /// 详情页使用原生氛围背景，不跟随全局壁纸同步
+    var ignoreCustomBackground: Bool = false
+    /// 主页壁纸额外模糊半径
+    var wallpaperBlur: CGFloat = 0
 
     /// 当前页面是否启用自定义背景：同步开启时全部页面生效，关闭时仅主页生效
     private var showCustomBackground: Bool {
-        theme.backgroundSyncAll || homeMode
+        !ignoreCustomBackground && (theme.backgroundSyncAll || homeMode)
     }
 
     /// 背景图上叠加的可读性遮罩：浅色模式几乎不压暗，深色模式适度压暗
@@ -62,32 +98,40 @@ struct GlassBackdrop: View {
             : [.black.opacity(0.08), .black.opacity(0.18)]
     }
 
+    private var uiStyle: BeansUIStyle {
+        uiStyleRaw == "outline" ? .clear : (BeansUIStyle(rawValue: uiStyleRaw) ?? .liquid)
+    }
+
     var body: some View {
         let _ = theme.accent
+        let activeBackgroundColor = theme.customBackground(for: colorScheme) ?? customColor
+        let activeBackgroundImage = theme.customBackgroundImage(for: colorScheme)
         ZStack {
-            // 上传图片优先：主页永远显示；同步开启时搜索/音乐库/我的也显示。
-            // 固定全屏布局 + 小图柔化，图片再小也不会撑大 UI
-            if let image = theme.customBackgroundImage, showCustomBackground {
-                WallpaperImage(image: image)
+            if uiStyle == .nativeClean, !showCustomBackground || (activeBackgroundImage == nil && activeBackgroundColor == nil) {
+                Color(UIColor.systemBackground)
+            } else if let image = activeBackgroundImage, showCustomBackground {
+                WallpaperImage(image: image, blurRadius: wallpaperBlur)
                 LinearGradient(colors: wallpaperOverlay, startPoint: .top, endPoint: .bottom)
-            } else if showCustomBackground, let customColor {
+            } else if showCustomBackground, let activeBackgroundColor {
                 LinearGradient(
-                    colors: [customColor.opacity(0.9), customColor.opacity(0.55)],
+                    colors: [activeBackgroundColor.opacity(0.9), activeBackgroundColor.opacity(0.55)],
                     startPoint: .top, endPoint: .bottom
                 )
             } else {
                 LinearGradient.beansBackdrop
             }
-            Circle()
-                .fill(Color.beansAmber.opacity(0.14))
-                .frame(width: 340, height: 340)
-                .blur(radius: 100)
-                .offset(x: 150, y: -300)
-            Circle()
-                .fill(Color.beansSage.opacity(0.12))
-                .frame(width: 300, height: 300)
-                .blur(radius: 110)
-                .offset(x: -160, y: 340)
+            if uiStyle != .nativeClean {
+                Circle()
+                    .fill(Color.beansAmber.opacity(0.14))
+                    .frame(width: 340, height: 340)
+                    .blur(radius: 100)
+                    .offset(x: 150, y: -300)
+                Circle()
+                    .fill(Color.beansSage.opacity(0.12))
+                    .frame(width: 300, height: 300)
+                    .blur(radius: 110)
+                    .offset(x: -160, y: 340)
+            }
         }
         .ignoresSafeArea()
     }
@@ -98,6 +142,7 @@ struct GlassBackdrop: View {
 
 struct WallpaperImage: View {
     let image: UIImage
+    var blurRadius: CGFloat = 0
 
     /// 小于约 700x700 视为小图：放大时轻度模糊柔化，避免满屏马赛克
     private static func isSmall(_ image: UIImage) -> Bool {
@@ -112,7 +157,7 @@ struct WallpaperImage: View {
                 .scaledToFill()
                 .frame(width: geo.size.width, height: geo.size.height)
                 .clipped()
-                .blur(radius: Self.isSmall(image) ? 5 : 0)
+                .blur(radius: max(Self.isSmall(image) ? 5 : 0, blurRadius))
         }
         .ignoresSafeArea()
     }
@@ -124,13 +169,14 @@ struct BeansGlass<S: Shape>: View {
     @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
 
     let shape: S
+    var forceLiquid = false
 
     private var uiStyle: BeansUIStyle {
-        BeansUIStyle(rawValue: uiStyleRaw) ?? .liquid
+        uiStyleRaw == "outline" ? .clear : (BeansUIStyle(rawValue: uiStyleRaw) ?? .liquid)
     }
 
     private var isLiquid: Bool {
-        uiStyle == .liquid
+        forceLiquid || uiStyle == .liquid || uiStyle == .nativeClean
     }
 
     var body: some View {
@@ -152,15 +198,28 @@ struct BeansGlass<S: Shape>: View {
                     .fill(.ultraThinMaterial)
             case .compact:
                 shape
-                    .fill(Color.beansGlassFill.opacity(0.62))
-            case .outline:
+                    .fill(Color.beansGlassFill.opacity(0.74))
+            case .nativeClean:
                 shape
-                    .fill(.ultraThinMaterial)
-                    .overlay {
-                        shape.stroke(Color.beansAmber.opacity(0.30), lineWidth: 0.9)
-                    }
+                    .fill(Color.beansGlassFill.opacity(0.62))
             }
         }
+    }
+}
+
+/// 统一表面容器：Apple 简洁样式使用低存在感的平面底色，
+/// 其他样式继续沿用原有的玻璃材质，避免页面局部出现不同质感。
+struct BeansSurface<S: Shape>: View {
+    @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
+
+    let shape: S
+
+    private var uiStyle: BeansUIStyle {
+        uiStyleRaw == "outline" ? .clear : (BeansUIStyle(rawValue: uiStyleRaw) ?? .liquid)
+    }
+
+    var body: some View {
+        BeansGlass(shape: shape)
     }
 }
 
@@ -172,19 +231,23 @@ struct GlassCard<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     private var uiStyle: BeansUIStyle {
-        BeansUIStyle(rawValue: uiStyleRaw) ?? .liquid
+        uiStyleRaw == "outline" ? .clear : (BeansUIStyle(rawValue: uiStyleRaw) ?? .liquid)
     }
 
     private var isLiquid: Bool {
-        uiStyle == .liquid
+        uiStyle == .liquid || uiStyle == .nativeClean
     }
 
     private var resolvedCornerRadius: CGFloat {
-        uiStyle == .compact ? min(cornerRadius, 16) : cornerRadius
+        if uiStyle == .compact { return min(cornerRadius, 16) }
+        if uiStyle == .nativeClean { return min(cornerRadius, 18) }
+        return cornerRadius
     }
 
     private var resolvedPadding: CGFloat {
-        uiStyle == .compact ? 12 : 16
+        if uiStyle == .compact { return 12 }
+        if uiStyle == .nativeClean { return 13 }
+        return 16
     }
 
     var body: some View {
@@ -208,17 +271,11 @@ struct GlassCard<Content: View>: View {
                 .padding(resolvedPadding)
                 .background {
                     RoundedRectangle(cornerRadius: resolvedCornerRadius, style: .continuous)
-                        .fill(uiStyle == .compact ? Color.beansGlassFill.opacity(0.62) : Color.clear)
+                        .fill(uiStyle == .compact ? Color.beansGlassFill.opacity(0.72) : Color.clear)
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: resolvedCornerRadius, style: .continuous))
                 }
-                .overlay {
-                    if uiStyle == .outline {
-                        RoundedRectangle(cornerRadius: resolvedCornerRadius, style: .continuous)
-                            .strokeBorder(Color.beansAmber.opacity(0.30), lineWidth: 0.9)
-                    }
-                }
                 .clipShape(RoundedRectangle(cornerRadius: resolvedCornerRadius, style: .continuous))
-                .beansCardShadow(radius: uiStyle == .compact ? 4 : 9, y: uiStyle == .compact ? 1 : 3)
+                .beansCardShadow(radius: 9, y: 3)
         }
     }
 }
@@ -278,6 +335,35 @@ struct BeansNavigationStack<Content: View>: View {
             NavigationStack { content() }
         } else {
             NavigationView { content() }.navigationViewStyle(.stack)
+        }
+    }
+}
+
+/// 带可编程路径的导航堆栈，用于从卡片点击进入统一的详情页。
+struct BeansNavigationStackWithPath<Route: Hashable, Content: View>: View {
+    @Binding var path: [Route]
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        if #available(iOS 16, *) {
+            NavigationStack(path: $path) { content() }
+        } else {
+            NavigationView { content() }.navigationViewStyle(.stack)
+        }
+    }
+}
+
+extension View {
+    /// iOS 16+ 的类型化导航目的地，低版本保持原有页面结构。
+    @ViewBuilder
+    func beansNavigationDestination<Route: Hashable, Destination: View>(
+        for route: Route.Type,
+        @ViewBuilder destination: @escaping (Route) -> Destination
+    ) -> some View {
+        if #available(iOS 16, *) {
+            navigationDestination(for: route, destination: destination)
+        } else {
+            self
         }
     }
 }
@@ -343,6 +429,51 @@ extension View {
     @ViewBuilder
     func beansScrollContentBackgroundHidden() -> some View {
         if #available(iOS 16, *) { self.scrollContentBackground(.hidden) } else { self }
+    }
+
+    /// 在歌单、排行榜等详情页底部保留可用的迷你播放器。
+    func beansDetailMiniPlayer() -> some View {
+        modifier(BeansDetailMiniPlayerModifier())
+    }
+}
+
+private struct BeansDetailMiniPlayerModifier: ViewModifier {
+    @EnvironmentObject private var auth: AuthStore
+    @EnvironmentObject private var player: PlayerManager
+    @EnvironmentObject private var theme: ThemeStore
+    @ObservedObject private var favorites = FavoritesStore.shared
+    @State private var showPlayer = false
+
+    func body(content: Content) -> some View {
+        content
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if player.currentSong != nil {
+                    MiniPlayerView(
+                        showPlayer: $showPlayer,
+                        presentation: .dock
+                    )
+                    .environmentObject(player.clock)
+                    .environmentObject(theme)
+                    .environmentObject(favorites)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 4)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .fullScreenCover(isPresented: $showPlayer) {
+                // 详情页使用与主页相同的播放页容器，确保顶部下拉手势可以关闭播放器。
+                BeansNowPlayingPresentation(
+                    isPresented: $showPlayer,
+                    usesSystemInteractiveDismissal: false
+                ) {
+                    PlayerView(isPresented: $showPlayer)
+                        .environmentObject(auth)
+                        .environmentObject(player)
+                        .environmentObject(player.clock)
+                        .environmentObject(theme)
+                        .environmentObject(favorites)
+                }
+            }
     }
 }
 
@@ -431,20 +562,30 @@ struct VIPBadgeView: View {
 
 struct GlassIconButton: View {
     @EnvironmentObject private var theme: ThemeStore
+    @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
     let systemName: String
     var size: CGFloat = 44
     var active = false
+    var forceLiquid = false
     let action: () -> Void
+
+    private var isNativeClean: Bool {
+        BeansUIStyle(rawValue: uiStyleRaw) == .nativeClean
+    }
 
     var body: some View {
         let _ = theme.accent
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: size * 0.38, weight: .semibold))
-                .foregroundStyle(active ? Color.beansAmber : Color.beansLabel)
+                .font(.system(size: size * (isNativeClean ? 0.42 : 0.38), weight: .semibold))
+                .foregroundStyle(active ? Color.beansAmber : (isNativeClean ? Color.primary : Color.beansLabel))
                 .frame(width: size, height: size)
                 .background {
-                    BeansGlass(shape: Circle())
+                    if isNativeClean && !forceLiquid {
+                        Circle().fill(active ? Color.beansAmber.opacity(0.12) : .clear)
+                    } else {
+                        BeansGlass(shape: Circle())
+                    }
                 }
                 .clipShape(Circle())
                 .contentShape(Circle())
@@ -457,10 +598,15 @@ struct GlassIconButton: View {
 
 struct GlassButton: View {
     @EnvironmentObject private var theme: ThemeStore
+    @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
     let title: String
     var systemName: String?
     var prominent = false
     let action: () -> Void
+
+    private var isNativeClean: Bool {
+        BeansUIStyle(rawValue: uiStyleRaw) == .nativeClean
+    }
 
     var body: some View {
         let _ = theme.accent
@@ -469,17 +615,29 @@ struct GlassButton: View {
                 if let systemName {
                     Image(systemName: systemName)
                 }
-                Text(title)
+                Text(LocalizedStringKey(title))
             }
             .font(BeansFont.appFont(15, .semibold))
-            .foregroundStyle(prominent ? Color.black : Color.beansLabel)
+            .foregroundStyle(prominent ? Color.white : Color.beansLabel)
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
-            .background(
-                prominent
-                    ? AnyShapeStyle(LinearGradient.beansAccent)
-                    : AnyShapeStyle(.thinMaterial)
-            )
+            .background {
+                if prominent {
+                    ZStack {
+                        BeansGlass(shape: Capsule(), forceLiquid: true)
+                        Capsule().fill(Color.beansAmber.opacity(0.78))
+                    }
+                } else if isNativeClean {
+                    Capsule().fill(Color.primary.opacity(0.055))
+                } else {
+                    Capsule().fill(.thinMaterial)
+                }
+            }
+            .overlay {
+                if isNativeClean && !prominent {
+                    Capsule().strokeBorder(Color.primary.opacity(0.075), lineWidth: 0.7)
+                }
+            }
             .clipShape(Capsule())
         }
         .buttonStyle(GlassPressButtonStyle())
@@ -489,16 +647,21 @@ struct GlassButton: View {
 // MARK: - 区块标题
 
 struct SectionHeader: View {
+    @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
     let title: String
     var trailing: String?
     var titleColor: Color = Color.beansLabel
     var trailingColor: Color = Color.beansComment
     var onTrailingTap: (() -> Void)?
 
+    private var isNativeClean: Bool {
+        BeansUIStyle(rawValue: uiStyleRaw) == .nativeClean
+    }
+
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(title)
-                .font(BeansFont.appFont(21, .bold))
+            Text(LocalizedStringKey(title))
+                .font(BeansFont.appFont(isNativeClean ? 26 : 21, .bold))
                 .foregroundStyle(titleColor)
             Spacer()
             if let trailing {
@@ -506,7 +669,7 @@ struct SectionHeader: View {
                     onTrailingTap?()
                 } label: {
                     HStack(spacing: 3) {
-                        Text(trailing)
+                        Text(LocalizedStringKey(trailing))
                             .font(BeansFont.appFont(13, .medium))
                         Image(systemName: "chevron.right")
                             .font(.system(size: 10, weight: .semibold))
@@ -530,7 +693,7 @@ struct EmptyStateView: View {
             Image(systemName: icon)
                 .font(.system(size: 44, weight: .light))
                 .foregroundStyle(Color.beansComment)
-            Text(text)
+            Text(LocalizedStringKey(text))
                 .font(BeansFont.appFont(14))
                 .foregroundStyle(Color.beansComment)
                 .multilineTextAlignment(.center)

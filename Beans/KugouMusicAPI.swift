@@ -8,6 +8,12 @@ final class KugouMusicAPI {
     private let gateway = "https://gateway.kugou.com"
     private let loginBase = "https://login-user.kugou.com"
     private let userService = "https://userservice.kugou.com"
+    // Keep the app's existing login flow, but use the current public KuGouMusicApi
+    // request profile for search, recommendations, charts, FM, and playback.
+    private let upstreamAppID = "1005"
+    private let upstreamClientVersion = "20489"
+    private let upstreamSignSalt = "OIlwieks28dk2k092lksi2UIkp"
+    private let upstreamSongClientVersion = "11430"
     private let appid = "3116"
     private let clientver = "11440"
     private let qrAppid = "1001"
@@ -143,9 +149,115 @@ final class KugouMusicAPI {
         }
     }
 
+    /// 酷狗私人漫游：使用 KuGouMusicApi 的 personal_fm 请求协议，连续取几批推荐，
+    /// 让首页不会被固定在首批三首歌曲。
+    func personalFM(limit: Int = 12) async throws -> [Song] {
+        let auth = KugouMusicAuth.shared
+        guard auth.isLoggedIn else { return [] }
+        auth.prepareDevice()
+
+        let target = max(limit, 1)
+        var songs: [Song] = []
+        var seen = Set<String>()
+        var lastHash: String?
+        var lastSongID: String?
+        let batchCount = max(1, min(8, Int(ceil(Double(target) / 3.0)) + 1))
+
+        for _ in 0..<batchCount {
+            let clientTime = Int(Date().timeIntervalSince1970 * 1000)
+            var data: [String: Any] = [
+                "appid": upstreamAppID,
+                "clienttime": clientTime,
+                "mid": auth.mid,
+                "action": "play",
+                "recommend_source_locked": 0,
+                "song_pool_id": 0,
+                "callerid": 0,
+                "m_type": 1,
+                "platform": "ios",
+                "area_code": 1,
+                "remain_songcnt": 0,
+                "clientver": upstreamClientVersion,
+                "is_overplay": lastHash == nil ? 0 : 1,
+                "mode": "normal",
+                "fakem": "ca981cfc583a4c37f28d2d49000013c16a0a",
+                "key": upstreamParamsKey("\(clientTime)"),
+            ]
+            if !auth.userId.isEmpty {
+                data["userid"] = Int(auth.userId) ?? 0
+                data["kguid"] = Int(auth.userId) ?? 0
+            }
+            if !auth.token.isEmpty { data["token"] = auth.token }
+            if auth.vipType > 0 { data["vip_type"] = auth.vipType }
+            if let lastHash { data["hash"] = lastHash }
+            if let lastSongID { data["songid"] = lastSongID }
+            if let lastHash, let lastSongID {
+                data["playtime"] = max(0, Int(songs.last?.duration ?? 0))
+                data["hash"] = lastHash
+                data["songid"] = lastSongID
+            }
+
+            let response = try await upstreamRequest(
+                "/v2/personal_recommend",
+                method: "POST",
+                data: data,
+                headers: ["x-router": "persnfm.service.kugou.com"]
+            )
+            let rows = Self.deepArrays(
+                response.json,
+                names: ["songs", "song", "songlist", "list", "data", "recommend", "recommend_list", "recommend_song", "personal_fm", "result"]
+            )
+            let batch = rows.compactMap(Self.mapCompleteTrack)
+            if batch.isEmpty {
+                let code = Self.deepInt(response.json, names: ["code", "status", "error_code", "errcode"])
+                let message = Self.deepString(response.json, names: ["msg", "message", "error_msg", "error_message"])
+                BeansLogger.shared.log("酷狗私人漫游接口无歌曲：code=\(code) message=\(message.isEmpty ? "无" : message)", level: .debug)
+                break
+            }
+            for song in batch where seen.insert(song.identityKey).inserted {
+                songs.append(song)
+                if songs.count >= target { return Array(songs.prefix(target)) }
+            }
+            lastHash = batch.last?.kugouHash
+            lastSongID = batch.last?.kugouAlbumAudioId
+            if lastHash == nil && lastSongID == nil { break }
+        }
+
+        // Keep the feature usable when the personal-FM service returns an empty
+        // payload for a valid login by falling back to Kugou daily suggestions.
+        if songs.isEmpty,
+           let fallback = try? await everydayRecommend(limit: target),
+           !fallback.isEmpty {
+            BeansLogger.shared.log("酷狗私人漫游无个性化结果，使用每日推荐兜底：返回 \(fallback.count) 首", level: .debug)
+            return Array(fallback.prefix(target))
+        }
+        BeansLogger.shared.log("酷狗私人漫游：返回 \(songs.count) 首", level: songs.isEmpty ? .warn : .info)
+        return songs
+    }
+
+    /// 酷狗每日推荐，替代首页原先用“热门歌曲”搜索模拟推荐的方式。
+    func everydayRecommend(limit: Int = 30) async throws -> [Song] {
+        KugouMusicAuth.shared.prepareDevice()
+        let response = try await upstreamRequest(
+            "/everyday_song_recommend",
+            method: "POST",
+            params: ["platform": "ios"],
+            headers: ["x-router": "everydayrec.service.kugou.com"]
+        )
+        let rows = Self.deepArrays(
+            response.json,
+            names: ["songs", "songlist", "list", "data", "recommend", "recommend_list"]
+        )
+        return Array(rows.compactMap(Self.mapCompleteTrack).prefix(max(limit, 1)))
+    }
+
     /// 酷狗自有移动端搜索接口：搜索结果携带 hash、专辑和封面，可直接复用酷狗播放地址解析。
-    /// 优先使用酷狗新版综合搜索，旧网页接口作为兜底。
+    /// 优先使用 KuGouMusicApi 的 v3/search/song，现有综合搜索和网页接口作为兜底。
     func searchSongs(keyword: String, limit: Int = 30) async throws -> [Song] {
+        if let upstream = try? await upstreamSearchSongs(keyword: keyword, limit: limit), !upstream.isEmpty {
+            BeansLogger.shared.log("酷狗 v3 搜索完成：\(keyword) 结果=\(upstream.count)", level: .info)
+            return upstream
+        }
         if let complete = try? await searchSongsComplete(keyword: keyword, limit: limit), !complete.isEmpty {
             BeansLogger.shared.log("酷狗综合搜索完成：\(keyword) 结果=\(complete.count)", level: .info)
             return complete
@@ -167,20 +279,61 @@ final class KugouMusicAPI {
         return songs
     }
 
+    private func upstreamSearchSongs(keyword: String, limit: Int) async throws -> [Song] {
+        let pageSize = min(max(limit, 1), 30)
+        // The upstream endpoint commonly returns 15 rows even when pagesize is 30.
+        // Keep paging in that case so artist pages do not stop at the first 15 songs.
+        let pageCount = max(1, min(40, Int(ceil(Double(max(limit, 1)) / 15.0)) + 2))
+        var result: [Song] = []
+        var seen = Set<String>()
+        for page in 1...pageCount {
+            let response = try await upstreamRequest(
+                "/v3/search/song",
+                params: [
+                    "albumhide": "0",
+                    "iscorrection": "1",
+                    "keyword": keyword,
+                    "nocollect": "0",
+                    "page": "\(page)",
+                    "pagesize": "\(pageSize)",
+                    "platform": "AndroidFilter",
+                ],
+                headers: ["x-router": "complexsearch.kugou.com"]
+            )
+            let rows = Self.deepArrays(
+                response.json,
+                names: ["info", "songs", "song", "list", "data"]
+            )
+            let batch = rows.compactMap(Self.mapCompleteTrack)
+            if batch.isEmpty { break }
+            let before = result.count
+            for song in batch where seen.insert(song.identityKey).inserted {
+                result.append(song)
+                if result.count >= limit { return Array(result.prefix(limit)) }
+            }
+            if result.count == before { break }
+        }
+        return result
+    }
+
     /// 酷狗 iOS 综合搜索接口。该接口返回的结果比旧网页接口完整，
     /// 同时携带歌曲 hash、专辑、歌手、封面和权限字段。
     private func searchSongsComplete(keyword: String, limit: Int) async throws -> [Song] {
         var result: [Song] = []
         var seen = Set<String>()
         let pageSize = min(max(limit, 1), 50)
-        let pages = max(1, Int(ceil(Double(min(max(limit, 1), 150)) / Double(pageSize))))
+        // 综合搜索接口经常固定只返回 15 条，即使 pagesize 请求更大；
+        // 不要用 songs.count < pageSize 判断分页结束，否则歌手页永远只得到首屏。
+        let pages = max(1, min(30, Int(ceil(Double(min(max(limit, 1), 300)) / 15.0)) + 2))
         for page in 1...pages {
             let songs = try await searchSongsCompletePage(keyword: keyword, page: page, pageSize: pageSize)
+            guard !songs.isEmpty else { break }
+            let before = result.count
             for song in songs where seen.insert(song.identityKey).inserted {
                 result.append(song)
                 if result.count >= limit { return result }
             }
-            if songs.count < pageSize { break }
+            if result.count == before { break }
         }
         return result
     }
@@ -253,8 +406,64 @@ final class KugouMusicAPI {
         return rows.prefix(min(max(pageSize, 1), 100)).compactMap(Self.mapCompleteTrack)
     }
 
+    /// 酷狗官方歌手搜索，保留 author_id，供歌手主页调用作者歌曲接口。
+    private func upstreamSearchArtists(keyword: String, limit: Int) async throws -> [Artist] {
+        let pageSize = min(max(limit, 1), 30)
+        let pageCount = max(1, min(10, Int(ceil(Double(max(limit, 1)) / Double(pageSize)))))
+        var result: [Artist] = []
+        var seen = Set<String>()
+
+        for page in 1...pageCount {
+            let response = try await upstreamRequest(
+                "/v1/search/author",
+                params: [
+                    "albumhide": "0",
+                    "iscorrection": "1",
+                    "keyword": keyword,
+                    "nocollect": "0",
+                    "page": "\(page)",
+                    "pagesize": "\(pageSize)",
+                    "platform": "AndroidFilter",
+                ],
+                headers: ["x-router": "complexsearch.kugou.com"]
+            )
+            let rows = Self.deepArrays(
+                response.json,
+                names: ["info", "authors", "artists", "author", "list", "data"]
+            )
+            if rows.isEmpty { break }
+
+            for item in rows {
+                let id = Self.string(
+                    item["author_id"] ?? item["authorid"] ?? item["singerid"] ?? item["singer_id"] ?? item["id"]
+                )
+                let name = Self.clean(
+                    Self.string(item["author_name"] ?? item["authorname"] ?? item["singername"] ?? item["name"])
+                )
+                guard !id.isEmpty, !name.isEmpty, seen.insert(id).inserted else { continue }
+                let cover = Self.normalizeURL(
+                    Self.string(item["avatar"] ?? item["pic"] ?? item["imgurl"] ?? item["img_url"] ?? item["author_pic"])
+                        .replacingOccurrences(of: "{size}", with: "400")
+                )
+                result.append(Artist(
+                    id: id,
+                    name: name,
+                    coverURL: URL(string: cover),
+                    source: .kugou
+                ))
+                if result.count >= limit { return result }
+            }
+            if rows.count < pageSize { break }
+        }
+        return result
+    }
+
     /// 基于酷狗官方歌曲搜索结果聚合歌手，保留官方歌手名与封面。
     func searchArtists(keyword: String, limit: Int = 40) async throws -> [Artist] {
+        if let artists = try? await upstreamSearchArtists(keyword: keyword, limit: limit), !artists.isEmpty {
+            BeansLogger.shared.log("酷狗歌手搜索完成：\(keyword) 结果=\(artists.count)", level: .info)
+            return artists
+        }
         let songs = try await searchSongs(keyword: keyword, limit: limit)
         var result: [Artist] = []
         var seen = Set<String>()
@@ -271,6 +480,134 @@ final class KugouMusicAPI {
             }
         }
         return result
+    }
+
+    /// 酷狗官方歌手歌曲接口。每页最多 100 首，按热度排序。
+    func artistSongs(authorID: String, page: Int = 1, limit: Int = 100) async throws -> [Song] {
+        let target = min(max(limit, 1), 100)
+        var songs: [Song] = []
+        var seen = Set<String>()
+
+        let upstream = (try? await upstreamArtistSongs(authorID: authorID, page: page, limit: target)) ?? []
+        for song in upstream where seen.insert(song.identityKey).inserted {
+            songs.append(song)
+        }
+
+        if songs.count < target {
+            let singer = (try? await officialArtistSongs(authorID: authorID, page: page, limit: target)) ?? []
+            if !singer.isEmpty {
+                for song in singer where seen.insert(song.identityKey).inserted {
+                    songs.append(song)
+                }
+            }
+        }
+
+        if songs.count < target {
+            let legacy = (try? await legacyArtistSongs(authorID: authorID, page: page, limit: target)) ?? []
+            if !legacy.isEmpty {
+                for song in legacy where seen.insert(song.identityKey).inserted {
+                    songs.append(song)
+                }
+            }
+        }
+
+        BeansLogger.shared.log("酷狗歌手歌曲：author=\(authorID) page=\(page) 返回 \(songs.count) 首", level: .debug)
+        return Array(songs.prefix(target))
+    }
+
+    private func upstreamArtistSongs(authorID: String, page: Int, limit: Int) async throws -> [Song] {
+        let target = min(max(limit, 1), 100)
+        let response = try await upstreamRequest(
+            "/openapi/kmr/v2/audio_group/author",
+            params: [
+                "author_id": authorID,
+                "area_code": "all",
+                "sort": "1",
+                "page": "\(max(page, 1))",
+                "pagesize": "\(target)",
+                "replace_api_version": "1",
+                "mvdata_need": "1",
+                "show_audio_honor": "1",
+                "show_audio_tag": "1",
+                "replace_need": "1",
+            ],
+            headers: ["kg-tid": "36"]
+        )
+        let rows = Self.deepArrays(
+            response.json,
+            names: ["songs", "songlist", "list", "info", "audio", "data"]
+        )
+        return rows.compactMap(Self.mapCompleteTrack)
+    }
+
+    /// 酷狗移动端歌手歌曲列表，通常比作者接口更完整。
+    private func officialArtistSongs(authorID: String, page: Int, limit: Int) async throws -> [Song] {
+        let target = min(max(limit, 1), 100)
+        var components = URLComponents(string: "https://mobilecdn.kugou.com/api/v3/singer/song")!
+        components.queryItems = [
+            URLQueryItem(name: "format", value: "json"),
+            URLQueryItem(name: "singerid", value: authorID),
+            URLQueryItem(name: "page", value: "\(max(page, 1))"),
+            URLQueryItem(name: "pagesize", value: "\(target)"),
+            URLQueryItem(name: "sorttype", value: "2"),
+            URLQueryItem(name: "sort", value: "1"),
+            URLQueryItem(name: "with_res_tag", value: "1"),
+            URLQueryItem(name: "identity", value: "3"),
+            URLQueryItem(name: "plat", value: "0"),
+            URLQueryItem(name: "area_code", value: "1"),
+            URLQueryItem(name: "version", value: "9108"),
+        ]
+        guard let url = components.url else { return [] }
+        let json = try await getJSON(url, ua: Self.browserUA)
+        let rows = Self.deepArrays(json, names: ["info", "songs", "songlist", "list", "data"])
+        let songs = rows.compactMap(Self.mapCompleteTrack)
+        if !songs.isEmpty {
+            BeansLogger.shared.log("酷狗 singer/song：author=\(authorID) page=\(page) 返回 \(songs.count) 首", level: .debug)
+        }
+        return songs
+    }
+
+    /// 老版作者歌曲接口作为分页补充，避免新版接口固定只返回 19 首。
+    private func legacyArtistSongs(authorID: String, page: Int, limit: Int) async throws -> [Song] {
+        let auth = KugouMusicAuth.shared
+        let clientTime = Int(Date().timeIntervalSince1970)
+        var data: [String: Any] = [
+            "appid": upstreamAppID,
+            "clientver": upstreamClientVersion,
+            "mid": auth.mid,
+            "clienttime": clientTime,
+            "key": upstreamParamsKey("\(clientTime)"),
+            "author_id": authorID,
+            "pagesize": min(max(limit, 1), 100),
+            "page": max(page, 1),
+            "sort": 1,
+            "area_code": "all",
+        ]
+        if !auth.userId.isEmpty {
+            data["userid"] = Int(auth.userId) ?? 0
+            data["kguid"] = Int(auth.userId) ?? 0
+        }
+        if !auth.token.isEmpty { data["token"] = auth.token }
+        let body = try JSONSerialization.data(withJSONObject: data)
+        let bodyString = String(data: body, encoding: .utf8) ?? ""
+        var params = upstreamBaseParams()
+        params["clienttime"] = "\(clientTime)"
+        params["signature"] = upstreamAndroidSignature(params: params, data: bodyString)
+        let response = try await request(
+            "/kmr/v1/audio_group/author",
+            baseURL: "https://openapi.kugou.com",
+            method: "POST",
+            params: params,
+            body: body,
+            headers: upstreamHeaders(extra: [
+                "x-router": "openapi.kugou.com",
+                "kg-tid": "220",
+                "clienttime": "\(clientTime)",
+                "Content-Type": "application/json",
+            ])
+        )
+        let rows = Self.deepArrays(response.json, names: ["songs", "songlist", "list", "info", "audio", "data"])
+        return rows.compactMap(Self.mapCompleteTrack)
     }
 
     /// 基于酷狗官方歌曲搜索结果聚合专辑，保留官方专辑名、歌手与封面。
@@ -295,6 +632,10 @@ final class KugouMusicAPI {
 
     /// 酷狗官方排行榜列表（移动站点 JSON）。
     func topLists(limit: Int = 10) async throws -> [KugouTopInfo] {
+        if let upstream = try? await upstreamTopLists(limit: limit), !upstream.isEmpty {
+            BeansLogger.shared.log("酷狗 v6 排行榜列表：返回 \(upstream.count) 个", level: .debug)
+            return upstream
+        }
         if let lists = try? await officialWebTopLists(limit: limit), !lists.isEmpty {
             return lists
         }
@@ -323,35 +664,158 @@ final class KugouMusicAPI {
         }
     }
 
+    private func upstreamTopLists(limit: Int) async throws -> [KugouTopInfo] {
+        let response = try await upstreamRequest(
+            "/ocean/v6/rank/list",
+            params: [
+                "plat": "2",
+                "withsong": "1",
+                "parentid": "0",
+            ]
+        )
+        let rows = Self.deepArrays(response.json, names: ["rank", "list", "ranklist", "data", "info"])
+        var seen = Set<Int>()
+        return rows.compactMap { item in
+            let id = Self.int(item["rankid"] ?? item["rank_id"] ?? item["id"])
+            let name = Self.clean(Self.string(item["rankname"] ?? item["rank_name"] ?? item["name"] ?? item["title"]))
+            guard id > 0, !name.isEmpty, seen.insert(id).inserted else { return nil }
+            let cover = Self.normalizeURL(
+                Self.string(item["imgurl"] ?? item["img_url"] ?? item["img_9"] ?? item["album_img_9"] ?? item["cover"])
+                    .replacingOccurrences(of: "{size}", with: "400")
+            )
+            return KugouTopInfo(
+                id: id,
+                name: name,
+                updateFrequency: Self.clean(Self.string(item["update_frequency"] ?? item["updateFrequency"])),
+                coverURL: URL(string: cover)
+            )
+        }.prefix(max(limit, 1)).map { $0 }
+    }
+
+    private func upstreamRankSongs(rankID: Int, limit: Int) async throws -> [Song] {
+        let target = max(limit, 1)
+        // The KMR endpoint may cap a response at roughly 20 rows regardless of
+        // pagesize, so a single request silently truncates chart details.
+        let pageSize = min(max(target, 1), 100)
+        let pageCount = max(1, min(50, Int(ceil(Double(target) / 30.0)) + 2))
+        var songs: [Song] = []
+        var seen = Set<String>()
+
+        for page in 1...pageCount {
+            let response = try await upstreamRequest(
+                "/openapi/kmr/v2/rank/audio",
+                method: "POST",
+                data: [
+                    "show_portrait_mv": 1,
+                    "show_type_total": 1,
+                    "filter_original_remarks": 1,
+                    "area_code": 1,
+                    "pagesize": pageSize,
+                    "rank_cid": 0,
+                    "type": 1,
+                    "page": page,
+                    "rank_id": rankID,
+                ],
+                headers: ["kg-tid": "369"]
+            )
+            let rows = Self.deepArrays(
+                response.json,
+                names: ["songs", "songlist", "list", "info", "data", "audio"]
+            )
+            let batch = rows.compactMap(Self.mapCompleteTrack)
+            if batch.isEmpty { break }
+
+            let before = songs.count
+            for song in batch where seen.insert(song.identityKey).inserted {
+                songs.append(song)
+                if songs.count >= target { return Array(songs.prefix(target)) }
+            }
+            // Some server-side chart variants repeat page one when they do not
+            // support pagination. Stop instead of issuing identical requests.
+            if songs.count == before { break }
+        }
+
+        return Array(songs.prefix(target))
+    }
+
     /// 酷狗官方排行榜歌曲。
     func rankSongs(rankID: Int, limit: Int = 100) async throws -> [Song] {
-        if let songs = try? await officialWebRankSongs(rankID: rankID, limit: limit), !songs.isEmpty {
-            guard songs.contains(where: { $0.coverURL == nil }) else { return songs }
-            if let mobileSongs = try? await mobileRankSongs(rankID: rankID, limit: limit), !mobileSongs.isEmpty {
-                let merged = Self.mergeRankCovers(primary: songs, fallback: mobileSongs)
-                BeansLogger.shared.log("酷狗排行榜封面补齐：rankid=\(rankID) 官网=\(songs.count) 移动端=\(mobileSongs.count)", level: .debug)
-                return merged
-            }
-            return songs
+        let target = max(limit, 1)
+        let upstream = (try? await upstreamRankSongs(rankID: rankID, limit: target)) ?? []
+        if !upstream.isEmpty {
+            BeansLogger.shared.log("酷狗 KMR 排行榜歌曲：rankid=\(rankID) 返回 \(upstream.count) 首", level: .debug)
         }
-        return try await mobileRankSongs(rankID: rankID, limit: limit)
+
+        // Keep the KMR order, but use the other official endpoints to fill a
+        // short page. This handles chart variants that expose only 20-22 rows
+        // through one of the APIs.
+        var merged = upstream
+        if merged.count < target,
+           let official = try? await officialWebRankSongs(rankID: rankID, limit: target),
+           !official.isEmpty {
+            merged = Self.mergeRankSongs(primary: merged, fallback: official, limit: target)
+            BeansLogger.shared.log("酷狗排行榜歌曲补齐：rankid=\(rankID) KMR=\(upstream.count) 官网=\(official.count) 当前=\(merged.count)", level: .debug)
+        }
+
+        if merged.count < target,
+           let mobile = try? await mobileRankSongs(rankID: rankID, limit: target),
+           !mobile.isEmpty {
+            merged = Self.mergeRankSongs(primary: merged, fallback: mobile, limit: target)
+            BeansLogger.shared.log("酷狗排行榜歌曲补齐：rankid=\(rankID) 当前=\(merged.count) 移动端=\(mobile.count)", level: .debug)
+        }
+
+        if merged.isEmpty {
+            throw NetEaseError.decoding("酷狗排行榜歌曲为空")
+        }
+
+        // If the main source has rows but missing covers, enrich them without
+        // changing the order or the song metadata selected above.
+        if merged.contains(where: { $0.coverURL == nil }),
+           let mobile = try? await mobileRankSongs(rankID: rankID, limit: target),
+           !mobile.isEmpty {
+            merged = Self.mergeRankCovers(primary: merged, fallback: mobile)
+        }
+        return Array(merged.prefix(target))
     }
 
     private func mobileRankSongs(rankID: Int, limit: Int) async throws -> [Song] {
-        var components = URLComponents(string: "https://m.kugou.com/rank/info")!
-        components.queryItems = [
-            URLQueryItem(name: "rankid", value: "\(rankID)"),
-            URLQueryItem(name: "page", value: "1"),
-            URLQueryItem(name: "json", value: "true"),
-        ]
-        guard let url = components.url else { throw NetEaseError.unknown("酷狗排行榜地址无效") }
-        let json = try await getJSON(url, ua: Self.browserUA)
-        let rows = (json["songs"] as? [String: Any])?["list"] as? [[String: Any]] ?? []
-        return rows.prefix(limit).compactMap(Self.mapTrack)
+        let target = max(limit, 1)
+        let pageSize = min(max(target, 1), 100)
+        let pageCount = max(1, min(50, Int(ceil(Double(target) / 20.0)) + 2))
+        var songs: [Song] = []
+        var seen = Set<String>()
+
+        for page in 1...pageCount {
+            var components = URLComponents(string: "https://m.kugou.com/rank/info")!
+            components.queryItems = [
+                URLQueryItem(name: "rankid", value: "\(rankID)"),
+                URLQueryItem(name: "page", value: "\(page)"),
+                URLQueryItem(name: "pagesize", value: "\(pageSize)"),
+                URLQueryItem(name: "json", value: "true"),
+            ]
+            guard let url = components.url else { throw NetEaseError.unknown("酷狗排行榜地址无效") }
+            let json = try await getJSON(url, ua: Self.browserUA)
+            let rows = (json["songs"] as? [String: Any])?["list"] as? [[String: Any]] ?? []
+            let batch = rows.compactMap(Self.mapCompleteTrack)
+            if batch.isEmpty { break }
+
+            let before = songs.count
+            for song in batch where seen.insert(song.identityKey).inserted {
+                songs.append(song)
+                if songs.count >= target { return Array(songs.prefix(target)) }
+            }
+            if songs.count == before { break }
+        }
+
+        return Array(songs.prefix(target))
     }
 
     /// 酷狗官方歌单广场（移动站点 JSON）。
     func recommendPlaylists(limit: Int = 12) async throws -> [Playlist] {
+        if let upstream = try? await upstreamRecommendPlaylists(limit: limit), !upstream.isEmpty {
+            BeansLogger.shared.log("酷狗 special_recommend：返回 \(upstream.count) 个歌单", level: .debug)
+            return upstream
+        }
         if let playlists = try? await officialWebPlaylists(limit: limit), !playlists.isEmpty {
             return playlists
         }
@@ -376,6 +840,51 @@ final class KugouMusicAPI {
                 source: .kugou
             )
         }
+    }
+
+    private func upstreamRecommendPlaylists(limit: Int) async throws -> [Playlist] {
+        let auth = KugouMusicAuth.shared
+        let clientTime = Int(Date().timeIntervalSince1970)
+        let specialRecommend: [String: Any] = [
+            "withtag": 1,
+            "withsong": 1,
+            "sort": 1,
+            "ugc": 1,
+            "is_selected": 0,
+            "withrecommend": 1,
+            "area_code": 1,
+            "categoryid": 0,
+        ]
+        let response = try await upstreamRequest(
+            "/v2/special_recommend",
+            method: "POST",
+            data: [
+                "appid": upstreamAppID,
+                "mid": auth.mid,
+                "clientver": upstreamClientVersion,
+                "platform": "android",
+                "clienttime": clientTime,
+                "userid": Int(auth.userId) ?? 0,
+                "module_id": 1,
+                "page": 1,
+                "pagesize": min(max(limit, 1), 30),
+                "key": upstreamParamsKey("\(clientTime)"),
+                "special_recommend": specialRecommend,
+                "req_multi": 1,
+                "retrun_min": 5,
+                "return_special_falg": 1,
+            ],
+            headers: ["x-router": "specialrec.service.kugou.com"]
+        )
+        let rows = Self.deepArrays(
+            response.json,
+            names: ["special_recommend", "playlists", "playlist", "list", "info", "data"]
+        )
+        var seen = Set<Int>()
+        return rows.compactMap { item in
+            guard let playlist = Self.mapPlaylist(item), seen.insert(playlist.id).inserted else { return nil }
+            return playlist
+        }.prefix(max(limit, 1)).map { $0 }
     }
 
     private func officialWebTopLists(limit: Int) async throws -> [KugouTopInfo] {
@@ -471,11 +980,13 @@ final class KugouMusicAPI {
         let pid = "\(listID)"
         var all: [[String: Any]] = []
         var page = 1
+        let pageSize = 200
+        let maxSongs = 10_000
         repeat {
             let body: [String: Any] = [
                 "listid": pid,
                 "page": page,
-                "pagesize": 200,
+                "pagesize": pageSize,
                 "area_code": 1,
                 "show_relate_goods": 0,
                 "allplatform": 1,
@@ -488,21 +999,27 @@ final class KugouMusicAPI {
             let pageTracks = Self.deepArrays(json, names: ["songs", "songlist", "list", "info", "files", "data"])
             BeansLogger.shared.log("酷狗歌单歌曲：listid=\(pid) page=\(page) 返回 \(pageTracks.count) 首", level: .debug)
             all.append(contentsOf: pageTracks)
-            if pageTracks.count < 200 { break }
+            if all.count >= maxSongs { break }
+            if pageTracks.count < pageSize { break }
             page += 1
-        } while page <= 10
+        } while page <= maxSongs / pageSize
+        if all.count > maxSongs {
+            all = Array(all.prefix(maxSongs))
+        }
+        BeansLogger.shared.log("酷狗歌单歌曲：listid=\(pid) 最终最多加载 \(all.count) 首", level: .debug)
         return all
             .sorted { (Self.int($0["fsort"] ?? $0["sort"] ?? $0["position"]) ) < (Self.int($1["fsort"] ?? $1["sort"] ?? $1["position"])) }
             .compactMap(Self.mapTrack)
     }
 
-    func songURL(song: Song) async throws -> String? {
+    func songURL(song: Song, quality: BeansAudioQuality? = nil) async throws -> String? {
         await refreshMembershipStatusIfNeeded()
+        let requestedQuality = quality ?? BeansAudioQuality.current
         var primary = song.kugouHash
         var qualityHashes = song.kugouQualityHashes
         var albumAudioId = song.kugouAlbumAudioId
         var albumId = song.kugouAlbumId
-        if Self.qualityHashCandidates(primary: primary, qualityHashes: qualityHashes).isEmpty,
+        if Self.qualityHashCandidates(primary: primary, qualityHashes: qualityHashes, quality: requestedQuality).isEmpty,
            let completed = try? await completePlaybackMetadata(for: song) {
             primary = completed.kugouHash ?? primary
             qualityHashes = completed.kugouQualityHashes ?? qualityHashes
@@ -510,23 +1027,34 @@ final class KugouMusicAPI {
             albumId = completed.kugouAlbumId ?? albumId
             BeansLogger.shared.log("酷狗播放元数据补齐：\(song.name) hash=\((primary ?? "").isEmpty ? "无" : "有") albumAudioId=\(albumAudioId ?? "")", level: .debug)
         }
-        let hashes = Self.qualityHashCandidates(primary: primary, qualityHashes: qualityHashes)
+        let hashes = Self.qualityHashCandidates(primary: primary, qualityHashes: qualityHashes, quality: requestedQuality)
         guard !hashes.isEmpty else { return nil }
-        return try await songURL(hashes: hashes, albumAudioId: albumAudioId, albumId: albumId)
+        return try await songURL(hashes: hashes, albumAudioId: albumAudioId, albumId: albumId, quality: requestedQuality)
     }
 
     func songURL(hash: String, albumAudioId: String?, albumId: String?) async throws -> String? {
-        try await songURL(hashes: [hash], albumAudioId: albumAudioId, albumId: albumId)
+        try await songURL(hashes: [hash], albumAudioId: albumAudioId, albumId: albumId, quality: BeansAudioQuality.current)
     }
 
-    private func songURL(hashes: [String], albumAudioId: String?, albumId: String?) async throws -> String? {
+    private func songURL(hashes: [String], albumAudioId: String?, albumId: String?, quality: BeansAudioQuality) async throws -> String? {
         let auth = KugouMusicAuth.shared
         let vipTypes = Self.vipTypeCandidates(auth.vipType, loggedIn: auth.isLoggedIn)
         var lastCode = 0
         var lastStatus = 0
         for hash in hashes {
+            if let latest = try? await upstreamSongURLOnce(
+                hash: hash,
+                albumAudioId: albumAudioId,
+                albumId: albumId,
+                quality: quality
+            ), let url = latest.url, !url.isEmpty {
+                BeansLogger.shared.log("酷狗 KuGouMusicApi 播放地址命中：hash=\(hash.prefix(8))", level: .debug)
+                return url
+            }
             for vipType in vipTypes {
-                let result = try await songURLOnce(hash: hash, albumAudioId: albumAudioId, albumId: albumId, vipType: vipType)
+                guard let result = try? await songURLOnce(hash: hash, albumAudioId: albumAudioId, albumId: albumId, vipType: vipType) else {
+                    continue
+                }
                 lastCode = result.code
                 lastStatus = result.status
                 if let url = result.url, !url.isEmpty {
@@ -539,7 +1067,9 @@ final class KugouMusicAPI {
             // 酷狗新版客户端使用 v5/url。旧版 i/v2 在部分新曲和会员曲目上
             // 只返回 status，不返回播放地址，因此再尝试一次官方新版通道。
             for vipType in vipTypes {
-                let v5 = try await songURLV5Once(hash: hash, albumAudioId: albumAudioId, albumId: albumId, vipType: vipType)
+                guard let v5 = try? await songURLV5Once(hash: hash, albumAudioId: albumAudioId, albumId: albumId, vipType: vipType, quality: quality) else {
+                    continue
+                }
                 lastCode = v5.code
                 lastStatus = v5.status
                 if let url = v5.url, !url.isEmpty {
@@ -559,12 +1089,76 @@ final class KugouMusicAPI {
         return nil
     }
 
+    /// KuGouMusicApi 使用的 song_url 请求：v5/url + signKey，不依赖网页播放地址。
+    private func upstreamSongURLOnce(
+        hash: String,
+        albumAudioId: String?,
+        albumId: String?,
+        quality requestedQuality: BeansAudioQuality
+    ) async throws -> (url: String?, status: Int, code: Int) {
+        let auth = KugouMusicAuth.shared
+        auth.prepareDevice()
+        let fileHash = hash.lowercased()
+        let quality: String
+        switch requestedQuality {
+        case .standard:
+            quality = "128"
+        case .higher, .exhigh:
+            quality = "320"
+        case .lossless:
+            quality = "flac"
+        case .hires:
+            quality = "high"
+        }
+
+        var params = upstreamBaseParams()
+        params["album_id"] = albumId ?? "0"
+        params["area_code"] = "1"
+        params["hash"] = fileHash
+        params["ssa_flag"] = "is_fromtrack"
+        params["version"] = upstreamSongClientVersion
+        params["quality"] = quality
+        params["behavior"] = "play"
+        params["pid"] = "2"
+        params["pidversion"] = "3001"
+        params["cmd"] = "26"
+        params["page_id"] = "151369488"
+        params["ppage_id"] = "463467626,350369493,788954147"
+        params["cdnBackup"] = "1"
+        params["module"] = ""
+        params["clientver"] = upstreamSongClientVersion
+        params["key"] = "\(fileHash)57ae12eb6890223e355ccfcb74edf70d\(upstreamAppID)\(auth.mid)\(auth.userId.isEmpty ? "0" : auth.userId)".kgMD5Hex
+        if let albumAudioId, !albumAudioId.isEmpty {
+            params["album_audio_id"] = albumAudioId
+        }
+
+        let response = try await request(
+            "/v5/url",
+            baseURL: gateway,
+            method: "GET",
+            params: params,
+            body: nil,
+            headers: upstreamHeaders(
+                extra: [
+                    "x-router": "trackercdn.kugou.com",
+                    "dfid": auth.dfid,
+                    "mid": auth.mid,
+                    "Cookie": auth.cookieHeader,
+                ]
+            )
+        )
+        let status = Self.deepInt(response.json, names: ["status", "result"])
+        let code = Self.deepInt(response.json, names: ["error_code", "errcode", "code"])
+        let raw = Self.deepString(response.json, names: ["play_url", "play_backup_url", "url", "src", "backup_url"])
+        return (raw.isEmpty ? nil : raw, status, code)
+    }
+
     /// 酷狗官方新版播放地址接口，参数结构与酷狗客户端的 v5/url 通道一致。
-    private func songURLV5Once(hash: String, albumAudioId: String?, albumId: String?, vipType: Int) async throws -> (url: String?, status: Int, code: Int) {
+    private func songURLV5Once(hash: String, albumAudioId: String?, albumId: String?, vipType: Int, quality requestedQuality: BeansAudioQuality) async throws -> (url: String?, status: Int, code: Int) {
         let auth = KugouMusicAuth.shared
         var components = URLComponents(string: "\(gateway)/v5/url")!
         let quality: String
-        switch BeansAudioQuality.current {
+        switch requestedQuality {
         case .standard:
             quality = "128"
         case .higher, .exhigh:
@@ -1013,6 +1607,74 @@ final class KugouMusicAPI {
         return response
     }
 
+    /// KuGouMusicApi 的标准版请求封装。它与应用原先的 3116/11440
+    /// 请求保持分开，避免不同客户端配置互相覆盖。
+    private func upstreamRequest(
+        _ path: String,
+        method: String = "GET",
+        params: [String: String] = [:],
+        data: [String: Any]? = nil,
+        headers: [String: String] = [:]
+    ) async throws -> RawResponse {
+        let body = try data.map { try JSONSerialization.data(withJSONObject: $0) }
+        var final = upstreamBaseParams()
+        params.forEach { final[$0.key] = $0.value }
+        let bodyString = body.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        final["signature"] = upstreamAndroidSignature(params: final, data: bodyString)
+        var requestHeaders = upstreamHeaders(extra: headers)
+        if body != nil, requestHeaders["Content-Type"] == nil {
+            requestHeaders["Content-Type"] = "application/json"
+        }
+
+        return try await request(
+            path,
+            baseURL: gateway,
+            method: method,
+            params: final,
+            body: body,
+            headers: requestHeaders
+        )
+    }
+
+    private func upstreamBaseParams() -> [String: String] {
+        let auth = KugouMusicAuth.shared
+        var params: [String: String] = [
+            "dfid": auth.dfid,
+            "mid": auth.mid,
+            "uuid": "-",
+            "appid": upstreamAppID,
+            "clientver": upstreamClientVersion,
+            "clienttime": "\(Int(Date().timeIntervalSince1970))",
+        ]
+        if auth.isLoggedIn {
+            params["token"] = auth.token
+            params["userid"] = auth.userId
+        }
+        return params
+    }
+
+    private func upstreamParamsKey(_ value: String) -> String {
+        "\(upstreamAppID)\(upstreamSignSalt)\(upstreamClientVersion)\(value)".kgMD5Hex
+    }
+
+    private func upstreamHeaders(extra: [String: String] = [:]) -> [String: String] {
+        let auth = KugouMusicAuth.shared
+        var headers: [String: String] = [
+            "User-Agent": androidUA,
+            "kg-rc": "1",
+            "kg-thash": "5d816a0",
+            "kg-rec": "1",
+            "kg-rf": "B9EDA08A64250DEFFBCADDEE00F8F25F",
+            "dfid": auth.dfid,
+            "mid": auth.mid,
+        ]
+        if !auth.cookieHeader.isEmpty {
+            headers["Cookie"] = auth.cookieHeader
+        }
+        extra.forEach { headers[$0.key] = $0.value }
+        return headers
+    }
+
     private func request(_ path: String, baseURL: String, method: String, params: [String: String], body: Data?, headers: [String: String]) async throws -> RawResponse {
         guard var comps = URLComponents(string: baseURL + path) else { throw NetEaseError.network }
         comps.queryItems = params.map { URLQueryItem(name: $0.key, value: $0.value) }
@@ -1047,6 +1709,11 @@ final class KugouMusicAPI {
     private func androidSignature(params: [String: String], data: String) -> String {
         let body = params.keys.sorted().map { "\($0)=\(params[$0] ?? "")" }.joined()
         return "\(androidSignKey)\(body)\(data)\(androidSignKey)".kgMD5Hex
+    }
+
+    private func upstreamAndroidSignature(params: [String: String], data: String) -> String {
+        let body = params.keys.sorted().map { "\($0)=\(params[$0] ?? "")" }.joined()
+        return "\(upstreamSignSalt)\(body)\(data)\(upstreamSignSalt)".kgMD5Hex
     }
 
     private func webSignature(params: [String: String]) -> String {
@@ -1272,6 +1939,32 @@ final class KugouMusicAPI {
         }
     }
 
+    private static func mergeRankSongs(primary: [Song], fallback: [Song], limit: Int) -> [Song] {
+        let target = max(limit, 1)
+        var result: [Song] = []
+        var seenIdentity = Set<String>()
+        var seenContent = Set<String>()
+
+        for song in primary + fallback {
+            let contentKey = rankSongContentKey(song)
+            guard seenIdentity.insert(song.identityKey).inserted else { continue }
+            if !contentKey.isEmpty, !seenContent.insert(contentKey).inserted { continue }
+            result.append(song)
+            if result.count >= target { break }
+        }
+        return result
+    }
+
+    private static func rankSongContentKey(_ song: Song) -> String {
+        if let hash = song.kugouHash?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !hash.isEmpty {
+            return "hash:\(hash)"
+        }
+        if let audioID = song.kugouAlbumAudioId?.trimmingCharacters(in: .whitespacesAndNewlines), !audioID.isEmpty {
+            return "audio:\(audioID)"
+        }
+        return "meta:\(song.name.lowercased())|\(song.artists.lowercased())|\(song.album.lowercased())|\(Int(song.duration))"
+    }
+
     private static func rankCoverMatchKey(_ song: Song) -> String {
         "\(song.name)|\(song.artists)".lowercased()
     }
@@ -1290,8 +1983,8 @@ final class KugouMusicAPI {
         return result
     }
 
-    private static func qualityHashCandidates(primary: String?, qualityHashes: [String: String]?) -> [String] {
-        let requested = BeansAudioQuality.current
+    private static func qualityHashCandidates(primary: String?, qualityHashes: [String: String]?, quality requestedQuality: BeansAudioQuality? = nil) -> [String] {
+        let requested = requestedQuality ?? BeansAudioQuality.current
         let order: [String]
         switch requested {
         case .hires:

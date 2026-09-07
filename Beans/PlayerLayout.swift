@@ -10,19 +10,46 @@ enum PlayerLayoutPart: String, CaseIterable, Identifiable {
     case cover = "封面"
     case title = "歌名"
     case previewLyric = "预览歌词"
-    case controlCenter = "控制中心"
-    case controlCenterCover = "控中封面"
-    case controlCenterTitle = "控中标题"
-    case controlCenterLyric = "控中歌词"
-    case controlCenterActions = "控中按钮"
+    case vinylAlbum = "黑胶播放器"
+    /// 保留旧的整体黑胶歌词布局键，用于兼容已保存的用户设置。
+    case vinylLyric = "黑胶歌词"
+    case vinylLyricsHeader = "黑胶歌词顶部"
+    case vinylLyricsText = "黑胶歌词文字"
     case progress = "进度条"
     case controls = "控制行"
     case loop = "循环按钮"
     case previous = "上一首"
+    case playPause = "播放暂停"
     case next = "下一首"
     case queue = "播放列表"
     case lyric = "歌词"
     case grabber = "指示线"
+
+    var id: String { rawValue }
+
+    /// 黑胶歌词现在拆成顶部信息和歌词文字两个独立组件，旧整体项不再显示在编辑器中。
+    static var editableCases: [PlayerLayoutPart] {
+        allCases.filter {
+            $0 != .vinylLyric
+                && $0 != .vinylAlbum
+                && $0 != .vinylLyricsHeader
+                && $0 != .vinylLyricsText
+        }
+    }
+}
+
+/// Apple Music 播放页实时调试组件。
+enum AppleMusicLayoutPart: String, CaseIterable, Identifiable {
+    case top = "顶部指示线"
+    case cover = "封面"
+    case title = "歌名歌手"
+    case previewLyric = "预览歌词"
+    case progress = "进度条"
+    case previous = "上一首"
+    case play = "播放按钮"
+    case next = "下一首"
+    case volume = "音量条"
+    case actions = "底部按钮"
 
     var id: String { rawValue }
 }
@@ -53,6 +80,7 @@ struct PlayerLayoutEntry: Codable, Equatable {
 enum PlayerLayoutStore {
     static let modeKey = "beans.playerLayoutMode"
     static let dataKey = "beans.playerLayoutData"
+    private static var pendingSave: DispatchWorkItem?
 
     static func load() -> [String: PlayerLayoutEntry] {
         guard let raw = UserDefaults.standard.string(forKey: dataKey),
@@ -60,10 +88,51 @@ enum PlayerLayoutStore {
               let dict = try? JSONDecoder().decode([String: PlayerLayoutEntry].self, from: data) else {
             return [:]
         }
-        return dict
+        var migrated = dict
+        var needsSave = false
+
+        if migrated[PlayerLayoutPart.vinylAlbum.rawValue] == PlayerLayoutEntry(x: 0, y: -8, scale: 1)
+            || migrated[PlayerLayoutPart.vinylAlbum.rawValue] == PlayerLayoutEntry(x: 0, y: -56, scale: 1)
+            || migrated[PlayerLayoutPart.vinylAlbum.rawValue] == PlayerLayoutEntry() {
+            migrated[PlayerLayoutPart.vinylAlbum.rawValue] = PlayerLayoutEntry(x: 0, y: 20, scale: 1)
+            needsSave = true
+        }
+        if migrated[PlayerLayoutPart.vinylLyric.rawValue] == PlayerLayoutEntry(x: 0, y: -10, scale: 1)
+            || migrated[PlayerLayoutPart.vinylLyric.rawValue] == PlayerLayoutEntry(x: -2, y: -56, scale: 1) {
+            migrated[PlayerLayoutPart.vinylLyric.rawValue] = PlayerLayoutEntry()
+            needsSave = true
+        }
+
+        // 将旧版“黑胶歌词”整体偏移迁移到新的顶部和歌词文字组件。
+        if migrated[PlayerLayoutPart.vinylLyricsHeader.rawValue] == nil,
+           migrated[PlayerLayoutPart.vinylLyricsText.rawValue] == nil {
+            let legacy = migrated[PlayerLayoutPart.vinylLyric.rawValue] ?? PlayerLayoutEntry()
+            migrated[PlayerLayoutPart.vinylLyricsHeader.rawValue] = legacy
+            migrated[PlayerLayoutPart.vinylLyricsText.rawValue] = legacy
+            migrated.removeValue(forKey: PlayerLayoutPart.vinylLyric.rawValue)
+            needsSave = true
+        }
+
+        if needsSave {
+            saveImmediately(migrated)
+        }
+        return migrated
     }
 
     static func save(_ dict: [String: PlayerLayoutEntry]) {
+        pendingSave?.cancel()
+        let snapshot = dict
+        let work = DispatchWorkItem {
+            guard let data = try? JSONEncoder().encode(snapshot),
+                  let raw = String(data: data, encoding: .utf8) else { return }
+            UserDefaults.standard.set(raw, forKey: dataKey)
+        }
+        pendingSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    static func saveImmediately(_ dict: [String: PlayerLayoutEntry]) {
+        pendingSave?.cancel()
         if let data = try? JSONEncoder().encode(dict),
            let raw = String(data: data, encoding: .utf8) {
             UserDefaults.standard.set(raw, forKey: dataKey)
@@ -79,22 +148,18 @@ enum PlayerLayoutStore {
         switch part {
         case .topBack, .topTitle, .topFavorite, .cover, .title, .previewLyric:
             return PlayerLayoutEntry(x: 0, y: 0, scale: 1)
-        case .controlCenter:
-            return PlayerLayoutEntry(x: 0, y: -14, scale: 0.92)
-        case .controlCenterCover:
-            return PlayerLayoutEntry(x: 0, y: 0, scale: 0.94)
-        case .controlCenterTitle:
-            return PlayerLayoutEntry(x: 0, y: 3, scale: 0.96)
-        case .controlCenterLyric:
-            return PlayerLayoutEntry(x: 0, y: 4, scale: 0.96)
-        case .controlCenterActions:
-            return PlayerLayoutEntry(x: 0, y: 12, scale: 0.94)
+        case .vinylAlbum:
+            return PlayerLayoutEntry(x: 0, y: 20, scale: 1)
+        case .vinylLyric, .vinylLyricsHeader, .vinylLyricsText:
+            return PlayerLayoutEntry()
         case .progress:
             return PlayerLayoutEntry(x: 0, y: 17, scale: 1)
         case .controls:
             return PlayerLayoutEntry(x: 0, y: 14, scale: 1.05)
         case .loop:
             return PlayerLayoutEntry(x: -5, y: 0, scale: 1.15)
+        case .playPause:
+            return PlayerLayoutEntry(x: 0, y: 0, scale: 1)
         case .queue:
             return PlayerLayoutEntry(x: 5, y: 0, scale: 1.15)
         case .previous, .next:
@@ -104,6 +169,123 @@ enum PlayerLayoutStore {
         case .lyric:
             return PlayerLayoutEntry(x: 0, y: 0, scale: 1)
         }
+    }
+}
+
+/// Apple Music 播放页布局存储。
+final class AppleMusicLayoutStore: ObservableObject {
+    static let shared = AppleMusicLayoutStore()
+
+    private static let dataKey = "beans.appleMusic.layoutData"
+    private let defaults = UserDefaults.standard
+
+    @Published var entries: [String: PlayerLayoutEntry] {
+            didSet { scheduleSave() }
+    }
+
+    private init() {
+        if let raw = defaults.string(forKey: Self.dataKey),
+           let data = raw.data(using: .utf8),
+           let stored = try? JSONDecoder().decode([String: PlayerLayoutEntry].self, from: data) {
+            var normalized = stored
+            if normalized[AppleMusicLayoutPart.top.rawValue] == PlayerLayoutEntry() {
+                normalized[AppleMusicLayoutPart.top.rawValue] = Self.defaultEntry(for: .top)
+            }
+            entries = normalized
+            if normalized != stored {
+                save(normalized)
+            }
+        } else {
+            entries = Self.migrateLegacyEntries(from: defaults)
+        }
+    }
+
+    func entry(for part: AppleMusicLayoutPart) -> PlayerLayoutEntry {
+        entries[part.rawValue] ?? Self.defaultEntry(for: part)
+    }
+
+    func set(_ entry: PlayerLayoutEntry, for part: AppleMusicLayoutPart) {
+        entries[part.rawValue] = entry
+    }
+
+    func reset(_ part: AppleMusicLayoutPart) {
+        entries[part.rawValue] = nil
+    }
+
+    func resetAll() {
+        entries = [:]
+    }
+
+    private var pendingSave: DispatchWorkItem?
+
+    private func scheduleSave() {
+        pendingSave?.cancel()
+        let snapshot = entries
+        let work = DispatchWorkItem { [weak self] in
+            self?.save(snapshot)
+        }
+        pendingSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    private func save(_ snapshot: [String: PlayerLayoutEntry]) {
+        guard let data = try? JSONEncoder().encode(snapshot),
+              let raw = String(data: data, encoding: .utf8) else {
+            return
+        }
+        defaults.set(raw, forKey: Self.dataKey)
+    }
+
+    static func defaultEntry(for part: AppleMusicLayoutPart) -> PlayerLayoutEntry {
+        switch part {
+        case .top:
+            return PlayerLayoutEntry(y: -63)
+        case .cover, .title, .previewLyric, .progress, .previous, .play, .next, .volume, .actions:
+            return PlayerLayoutEntry()
+        }
+    }
+
+    private static func migrateLegacyEntries(from defaults: UserDefaults) -> [String: PlayerLayoutEntry] {
+        var migrated: [String: PlayerLayoutEntry] = [:]
+
+        func legacyDouble(_ key: String, defaultValue: Double) -> CGFloat {
+            guard defaults.object(forKey: key) != nil else { return CGFloat(defaultValue) }
+            return CGFloat(defaults.double(forKey: key))
+        }
+
+        migrated[AppleMusicLayoutPart.top.rawValue] = PlayerLayoutEntry(
+            y: legacyDouble("beans.appleMusic.topY", defaultValue: -63)
+        )
+        migrated[AppleMusicLayoutPart.cover.rawValue] = PlayerLayoutEntry(
+            scale: legacyDouble("beans.appleMusic.coverScale", defaultValue: 1)
+        )
+        migrated[AppleMusicLayoutPart.title.rawValue] = PlayerLayoutEntry(
+            y: legacyDouble("beans.appleMusic.titleY", defaultValue: 0)
+        )
+        migrated[AppleMusicLayoutPart.previewLyric.rawValue] = PlayerLayoutEntry(
+            y: legacyDouble("beans.appleMusic.lyricY", defaultValue: 0)
+        )
+        let legacyControls = PlayerLayoutEntry(
+            y: legacyDouble("beans.appleMusic.controlsY", defaultValue: 0)
+        )
+        migrated[AppleMusicLayoutPart.previous.rawValue] = legacyControls
+        migrated[AppleMusicLayoutPart.play.rawValue] = legacyControls
+        migrated[AppleMusicLayoutPart.next.rawValue] = legacyControls
+        migrated[AppleMusicLayoutPart.actions.rawValue] = PlayerLayoutEntry(
+            y: legacyDouble("beans.appleMusic.actionsY", defaultValue: 0)
+        )
+        return migrated
+    }
+}
+
+/// 仅负责应用 Apple Music 组件的实时位置和大小。
+struct AppleMusicLayoutTransform: ViewModifier {
+    let entry: PlayerLayoutEntry
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(entry.scale)
+            .offset(x: entry.x, y: entry.y)
     }
 }
 

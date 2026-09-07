@@ -7,7 +7,7 @@ struct SleepTimerSheet: View {
 
     private let options = [5, 15, 30, 45, 60, 90]
     /// 自定义定时分钟数
-    @State private var customMinutes = 30
+    @State private var customMinutesText = "30"
 
     var body: some View {
         let _ = theme.accent
@@ -16,7 +16,7 @@ struct SleepTimerSheet: View {
                 if player.sleepTimerRemaining > 0 {
                     Section("当前定时") {
                         Label {
-                            Text("剩余 \(player.sleepTimerFormatted ?? "0:00")")
+                            Text(String(format: NSLocalizedString("剩余 %@", comment: ""), player.sleepTimerFormatted ?? "0:00"))
                         } icon: {
                             Image(systemName: "moon.zzz.fill")
                                 .foregroundStyle(Color.beansAmber)
@@ -30,7 +30,7 @@ struct SleepTimerSheet: View {
                             dismiss()
                         } label: {
                             HStack {
-                                Text("\(minutes) 分钟后关闭")
+                                Text(String(format: NSLocalizedString("%d 分钟后关闭", comment: ""), minutes))
                                     .foregroundStyle(Color.beansLabel)
                                 Spacer()
                                 if isActive(minutes) {
@@ -48,19 +48,21 @@ struct SleepTimerSheet: View {
                     }
                 }
                 Section("自定义时长") {
-                    Stepper(value: $customMinutes, in: 1...180, step: 1) {
-                        HStack {
-                            Text("自定义")
-                            Spacer()
-                            Text("\(customMinutes) 分钟")
-                                .foregroundStyle(Color.beansComment)
-                        }
+                    HStack {
+                        Text("分钟")
+                        Spacer()
+                        TextField("分钟", text: $customMinutesText)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 90)
+                            .textFieldStyle(.roundedBorder)
                     }
                     Button {
-                        player.startSleepTimer(minutes: customMinutes)
+                        let minutes = min(max(Int(customMinutesText) ?? 30, 1), 720)
+                        player.startSleepTimer(minutes: minutes)
                         dismiss()
                     } label: {
-                        Label("\(customMinutes) 分钟后关闭", systemImage: "timer")
+                        Label("开始自定义定时", systemImage: "timer")
                             .foregroundStyle(Color.beansLabel)
                     }
                 }

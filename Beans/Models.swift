@@ -1,6 +1,6 @@
 import Foundation
 
-/// 音质等级（借鉴 Kumone：standard / higher / exhigh / lossless / hires）
+/// 音质等级。
 enum BeansAudioQuality: String, CaseIterable, Identifiable {
     case standard
     case higher
@@ -12,10 +12,10 @@ enum BeansAudioQuality: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .standard: return "标准"
-        case .higher: return "较高"
-        case .exhigh: return "极高"
-        case .lossless: return "无损"
+        case .standard: return beansLocalized("标准", "Standard")
+        case .higher: return beansLocalized("较高", "Higher")
+        case .exhigh: return beansLocalized("极高", "Very High")
+        case .lossless: return beansLocalized("无损", "Lossless")
         case .hires: return "Hi-Res"
         }
     }
@@ -23,10 +23,118 @@ enum BeansAudioQuality: String, CaseIterable, Identifiable {
     /// 网易云 songURL 的 level 参数
     var level: String { rawValue }
 
-    /// 当前设置（默认极高 320kbps；高音质拿不到时自动回落到标准音质）
+    /// 当前官方播放音质（默认 Hi-Res；不可用时由各平台接口自行降级）。
     static var current: BeansAudioQuality {
-        let raw = UserDefaults.standard.string(forKey: "beans.audioQuality")
-        return BeansAudioQuality(rawValue: raw ?? "") ?? .exhigh
+        let raw = UserDefaults.standard.string(forKey: "beans.audioQuality") ?? Self.hires.rawValue
+        return BeansAudioQuality(rawValue: raw) ?? .hires
+    }
+}
+
+/// 第三方音源音质。
+enum ThirdPartyAudioQuality: String, CaseIterable, Identifiable, Sendable {
+    case kb128 = "128k"
+    case kb320 = "320k"
+    case flac = "flac"
+    case flac24bit = "flac24bit"
+    case hires = "hires"
+    case atmos = "atmos"
+    case atmosPlus = "atmos_plus"
+    case master = "master"
+
+    static let storageKey = "beans.thirdPartyAudioQuality"
+    static let downloadStorageKey = "beans.downloadAudioQuality"
+
+    var id: String { rawValue }
+
+    /// 兼容第三方脚本常见的音质别名（例如 24bit / lossless）。
+    init?(sourceValue: String) {
+        let normalized = sourceValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch normalized {
+        case "128", "128k", "low", "standard": self = .kb128
+        case "320", "320k", "high", "exhigh": self = .kb320
+        case "flac", "lossless": self = .flac
+        case "24bit", "flac24", "flac24bit", "hires24": self = .flac24bit
+        case "hires", "highres", "high-resolution": self = .hires
+        case "atmos", "dolby": self = .atmos
+        case "atmosplus", "atmos_plus", "dolbyplus": self = .atmosPlus
+        case "master", "masterquality": self = .master
+        default: return nil
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .kb128: return beansLocalized("128k", "128k")
+        case .kb320: return beansLocalized("320k", "320k")
+        case .flac: return beansLocalized("无损 FLAC", "FLAC")
+        case .flac24bit: return beansLocalized("FLAC 24 位", "FLAC 24-bit")
+        case .hires: return beansLocalized("Hi-Res", "Hi-Res")
+        case .atmos: return beansLocalized("Atmos", "Atmos")
+        case .atmosPlus: return beansLocalized("Atmos+", "Atmos+")
+        case .master: return beansLocalized("Master", "Master")
+        }
+    }
+
+    /// 当前第三方音源优先音质。
+    static var current: ThirdPartyAudioQuality {
+        UserDefaults.standard.string(forKey: storageKey)
+            .flatMap { ThirdPartyAudioQuality(sourceValue: $0) } ?? .kb320
+    }
+
+    /// 下载使用的独立音质设置，默认保持 320k 以兼容旧版本。
+    static var downloadCurrent: ThirdPartyAudioQuality {
+        UserDefaults.standard.string(forKey: downloadStorageKey)
+            .flatMap { ThirdPartyAudioQuality(sourceValue: $0) } ?? .kb320
+    }
+
+    /// 按第三方接口的平台代码返回可用档位。
+    static func supported(providerCode: String) -> [ThirdPartyAudioQuality] {
+        switch providerCode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "kw", "mg":
+            return [.kb128, .kb320, .flac, .flac24bit, .hires]
+        case "kg":
+            return [.kb128, .kb320, .flac, .flac24bit, .hires, .atmos, .master]
+        case "tx":
+            return allCases
+        case "wy":
+            return [.kb128, .kb320, .flac, .flac24bit, .hires, .atmos, .master]
+        case "git":
+            return [.kb128, .kb320, .flac]
+        default:
+            return allCases
+        }
+    }
+
+    static func supported(for source: SongSource) -> [ThirdPartyAudioQuality] {
+        switch source {
+        case .netease: return supported(providerCode: "wy")
+        case .qq: return supported(providerCode: "tx")
+        case .kugou: return supported(providerCode: "kg")
+        }
+    }
+
+    /// 从高到低的降级链。
+    var fallbackChain: [ThirdPartyAudioQuality] {
+        switch self {
+        case .kb128:
+            return [.kb128]
+        case .kb320:
+            return [.kb320, .kb128]
+        case .flac:
+            return [.flac, .kb320, .kb128]
+        case .flac24bit:
+            return [.flac24bit, .flac, .kb320, .kb128]
+        case .hires:
+            return [.hires, .flac24bit, .flac, .kb320, .kb128]
+        case .atmos:
+            return [.atmos, .hires, .flac24bit, .flac, .kb320, .kb128]
+        case .atmosPlus:
+            return [.atmosPlus, .atmos, .hires, .flac24bit, .flac, .kb320, .kb128]
+        case .master:
+            return [.master, .atmosPlus, .atmos, .hires, .flac24bit, .flac, .kb320, .kb128]
+        }
     }
 }
 
@@ -196,12 +304,13 @@ struct Album: Identifiable, Hashable {
     var trackCount: Int?
 }
 
-struct Playlist: Identifiable, Hashable {
+struct Playlist: Identifiable, Hashable, Codable {
     let id: Int
     let name: String
     var coverURL: URL?
     let trackCount: Int
     let creatorName: String
+    let specialType: Int
     /// 歌单来源（网易云 / QQ音乐），非网易云歌单用对应接口加载
     let source: SongSource
 
@@ -211,6 +320,7 @@ struct Playlist: Identifiable, Hashable {
         self.coverURL = coverURL
         self.trackCount = trackCount
         self.creatorName = ""
+        self.specialType = 0
         self.source = source
     }
 
@@ -219,9 +329,10 @@ struct Playlist: Identifiable, Hashable {
         self.id = id
         name = json["name"] as? String ?? ""
         trackCount = json["trackCount"] as? Int ?? 0
-        let pic = json["coverImgUrl"] as? String ?? ""
+        let pic = json["coverImgUrl"] as? String ?? json["picUrl"] as? String ?? ""
         coverURL = pic.isEmpty ? nil : URL(string: pic)
         creatorName = (json["creator"] as? [String: Any])?["nickname"] as? String ?? ""
+        specialType = json["specialType"] as? Int ?? 0
         source = .netease
     }
 
@@ -233,7 +344,12 @@ struct Playlist: Identifiable, Hashable {
         let pic = json["picUrl"] as? String ?? ""
         coverURL = pic.isEmpty ? nil : URL(string: pic)
         creatorName = ""
+        specialType = json["specialType"] as? Int ?? 0
         source = .netease
+    }
+
+    var isNetEaseLikedPlaylist: Bool {
+        source == .netease && (specialType == 5 || name == "我喜欢的音乐" || name.localizedCaseInsensitiveContains("liked songs"))
     }
 }
 

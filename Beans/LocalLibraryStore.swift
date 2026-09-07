@@ -61,6 +61,23 @@ final class LocalLibraryStore: ObservableObject {
         playlists[idx].name = name
     }
 
+    /// 调整本地歌单顺序，顺序会随歌单一起持久化。
+    func movePlaylist(id: UUID, offset: Int) {
+        guard let index = playlists.firstIndex(where: { $0.id == id }) else { return }
+        let destination = index + offset
+        guard playlists.indices.contains(destination) else { return }
+        var reordered = playlists
+        reordered.swapAt(index, destination)
+        playlists = reordered
+    }
+
+    /// 使用 List 的拖动结果更新顺序，显式重新赋值确保 @Published 与持久化都能触发。
+    func movePlaylists(from offsets: IndexSet, to destination: Int) {
+        var reordered = playlists
+        reordered.move(fromOffsets: offsets, toOffset: destination)
+        playlists = reordered
+    }
+
     /// 添加歌曲到本地歌单（按 identityKey 去重）
     func addSong(_ song: Song, to id: UUID) {
         guard let idx = playlists.firstIndex(where: { $0.id == id }) else { return }
@@ -68,9 +85,57 @@ final class LocalLibraryStore: ObservableObject {
         playlists[idx].songs.append(song)
     }
 
+    @discardableResult
+    func addSongs(_ songs: [Song], to id: UUID) -> Int {
+        let before = playlists.first(where: { $0.id == id })?.songs.count ?? 0
+        for song in songs {
+            addSong(song, to: id)
+        }
+        let after = playlists.first(where: { $0.id == id })?.songs.count ?? before
+        return after - before
+    }
+
+    func containsSong(_ song: Song?) -> Bool {
+        guard let song else { return false }
+        return playlists.contains { $0.songs.contains { $0.identityKey == song.identityKey } }
+    }
+
+    @discardableResult
+    func addToDefaultFavorites(_ song: Song, name: String = "我的收藏歌单") -> String {
+        let playlist = playlists.first(where: { $0.name == name }) ?? createPlaylist(name: name)
+        let before = playlists.first(where: { $0.id == playlist.id })?.songs.count ?? 0
+        addSong(song, to: playlist.id)
+        let after = playlists.first(where: { $0.id == playlist.id })?.songs.count ?? before
+        return after > before ? "已加入「\(playlist.name)」" : "已在「\(playlist.name)」中"
+    }
+
+    @discardableResult
+    func syncSongs(_ songs: [Song], intoPlaylistNamed name: String = "三平台喜欢") -> Int {
+        let target: LocalPlaylist
+        if let existing = playlists.first(where: { $0.name == name }) {
+            target = existing
+        } else {
+            target = createPlaylist(name: name)
+        }
+        let before = playlists.first(where: { $0.id == target.id })?.songs.count ?? 0
+        for song in songs { addSong(song, to: target.id) }
+        return (playlists.first(where: { $0.id == target.id })?.songs.count ?? before) - before
+    }
+
     func removeSong(playlistID: UUID, songIdentity: String) {
         guard let idx = playlists.firstIndex(where: { $0.id == playlistID }) else { return }
         playlists[idx].songs.removeAll { $0.identityKey == songIdentity }
+    }
+
+    @discardableResult
+    func removeSongFromAllPlaylists(_ song: Song) -> Int {
+        var removed = 0
+        for index in playlists.indices {
+            let before = playlists[index].songs.count
+            playlists[index].songs.removeAll { $0.identityKey == song.identityKey }
+            removed += before - playlists[index].songs.count
+        }
+        return removed
     }
 
     private func save() {

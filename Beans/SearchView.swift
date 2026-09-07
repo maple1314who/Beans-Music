@@ -38,8 +38,8 @@ struct FlowLayout: Layout {
     }
 }
 
-enum SearchProvider: String, CaseIterable, Identifiable {
-    case netease = "网易云"
+enum SearchProvider: String, CaseIterable, Identifiable, Hashable {
+    case netease = "网易云音乐"
     case qq = "QQ音乐"
     case kugou = "酷狗音乐"
 
@@ -90,8 +90,11 @@ struct SearchView: View {
     @EnvironmentObject private var player: PlayerManager
     @EnvironmentObject private var auth: AuthStore
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
+    @AppStorage(PlatformPreferenceStore.hidePickerKey) private var hidePlatformPicker = false
 
     @State private var keyword = ""
+    @AppStorage("beans.search.provider") private var providerRaw = SearchProvider.netease.rawValue
     @State private var provider: SearchProvider = .netease
     @ObservedObject private var platformPrefs = PlatformPreferenceStore.shared
     private var searchProviders: [SearchProvider] { platformPrefs.enabledSearchProviders }
@@ -106,11 +109,16 @@ struct SearchView: View {
     @State private var errorMessage: String?
     @State private var showAddToPlaylist: Song?
     @State private var selectedArtist: Artist?
+    @State private var selectedAlbum: Album?
     @ObservedObject private var historyStore = SearchHistoryStore.shared
     @State private var debounceTask: Task<Void, Never>?
     @State private var searchTask: Task<Void, Never>?
     /// UIKit 输入框控制器（提交拼音、收起键盘等由它统一处理）
     @State private var searchController = SearchFieldController()
+
+    private var isNativeClean: Bool {
+        BeansUIStyle(rawValue: uiStyleRaw) == .nativeClean
+    }
 
     var body: some View {
         let _ = theme.accent
@@ -129,16 +137,16 @@ struct SearchView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 10)
 
-                HStack(spacing: 8) {
+                if !hidePlatformPicker {
                     providerPicker
-                    PlatformKugouToggleButton()
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 8)
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 8)
 
                 contentArea
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .task(id: provider) {
             guard hotLoadedProvider != provider else { return }
@@ -163,13 +171,14 @@ struct SearchView: View {
             }
         }
         .onChange(of: provider) { _ in
+            providerRaw = provider.rawValue
             let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
             debounceTask?.cancel()
             Task { await startSearch(trimmed) }
         }
         .onAppear {
-            provider = platformPrefs.ensureVisible(provider)
+            provider = platformPrefs.ensureVisible(SearchProvider(rawValue: providerRaw) ?? .netease)
         }
         .onReceive(platformPrefs.changes) { _ in
             let next = platformPrefs.ensureVisible(provider)
@@ -179,24 +188,38 @@ struct SearchView: View {
             }
         }
         .sheet(item: $showAddToPlaylist) { song in
-            AddToPlaylistSheet(song: song)
-                .environmentObject(auth)
+            AddToLocalPlaylistSheet(song: song)
+                .environmentObject(theme)
         }
         .sheet(item: $selectedArtist) { artist in
             ArtistHomeSheet(artist: artist)
                 .environmentObject(player)
+        }
+        .sheet(item: $selectedAlbum) { album in
+            AlbumDetailView(album: album)
+                .environmentObject(player)
+                .environmentObject(theme)
         }
     }
 
     // MARK: - 顶部标题
 
     private var headerTitle: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 10) {
-                Text("搜索")
-                    .font(BeansFont.appFont(30, .bold))
-                    .foregroundStyle(Color.beansLabel)
-                Spacer(minLength: 0)
+        HStack(alignment: .center, spacing: 10) {
+            Text("搜索")
+                .font(BeansFont.appFont(32, .bold))
+                .foregroundStyle(Color.beansLabel)
+            Spacer(minLength: 0)
+            Menu {
+                ForEach(searchProviders) { candidate in
+                    Button {
+                        BeansHaptics.tap()
+                        provider = candidate
+                    } label: {
+                        Label(LocalizedStringKey(candidate.rawValue), systemImage: candidate == provider ? "checkmark" : candidate.icon)
+                    }
+                }
+            } label: {
                 HStack(spacing: 6) {
                     if let imageName = provider.brandImageName {
                         Image(imageName)
@@ -207,14 +230,17 @@ struct SearchView: View {
                         Image(systemName: provider.icon)
                             .font(.system(size: 12, weight: .semibold))
                     }
-                    Text(provider.rawValue)
+                    Text(LocalizedStringKey(provider.rawValue))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
                 }
                 .font(BeansFont.appFont(12, .semibold))
                 .foregroundStyle(Color.beansComment)
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 11)
                 .padding(.vertical, 6)
                 .background { BeansGlass(shape: Capsule()) }
             }
+            .disabled(searchProviders.count < 2)
         }
     }
 
@@ -245,7 +271,7 @@ struct SearchView: View {
             SearchTextField(
                 text: $keyword,
                 controller: searchController,
-                placeholder: "搜索歌曲、歌手、专辑",
+                placeholder: beansLocalized("搜索歌曲、歌手、专辑", "Search songs, artists, or albums"),
                 textColor: UIColor.beansLabel,
                 onSubmit: { text in
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -257,12 +283,15 @@ struct SearchView: View {
             )
             .frame(height: 32)
             .frame(maxWidth: .infinity)
-            if searching {
+            ZStack {
                 ProgressView()
                     .controlSize(.small)
                     .tint(Color.beansAmber)
+                    .opacity(searching ? 1 : 0)
             }
-            if !keyword.isEmpty {
+            .frame(width: 20, height: 22)
+            .animation(nil, value: searching)
+            ZStack {
                 Button {
                     keyword = ""
                     songResults = []
@@ -276,7 +305,10 @@ struct SearchView: View {
                         .foregroundStyle(Color.beansComment.opacity(0.85))
                 }
                 .buttonStyle(.plain)
+                .opacity(keyword.isEmpty ? 0 : 1)
+                .disabled(keyword.isEmpty)
             }
+            .frame(width: 20, height: 22)
             Button {
                 // 先提交拼音再读取，避免组字中读到旧值或输入被清空
                 let text = searchController.commit()
@@ -294,14 +326,16 @@ struct SearchView: View {
                     .background { BeansGlass(shape: Capsule()) }
             }
             .buttonStyle(GlassPressButtonStyle(scale: 0.9))
+            .frame(width: 54, height: 30)
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 15)
+        .padding(.vertical, 6)
         .background {
-                        BeansGlass(shape: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            BeansGlass(shape: RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .beansCardShadow(radius: 8, y: 3)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .beansCardShadow(radius: 4, y: 2)
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - 平台选择（等宽分段控件）
@@ -323,7 +357,7 @@ struct SearchView: View {
                             Image(systemName: p.icon)
                                 .font(.system(size: 11, weight: .semibold))
                         }
-                        Text(p.rawValue)
+                        Text(LocalizedStringKey(p.rawValue))
                             .font(BeansFont.appFont(13, .semibold))
                     }
                     .foregroundStyle(provider == p ? Color.white : Color.beansComment)
@@ -341,7 +375,7 @@ struct SearchView: View {
             }
         }
         .padding(4)
-        .background { BeansGlass(shape: Capsule()) }
+        .background { BeansSurface(shape: Capsule()) }
         .clipShape(Capsule())
     }
 
@@ -368,7 +402,7 @@ struct SearchView: View {
                     searching = true
                     Task { await startSearch(trimmed) }
                 } label: {
-                    Text(type.rawValue)
+                        Text(LocalizedStringKey(type.rawValue))
                         .font(BeansFont.appFont(13, .semibold))
                         .foregroundStyle(resultType == type ? Color.beansLabel : Color.beansComment)
                         .frame(maxWidth: .infinity)
@@ -384,7 +418,7 @@ struct SearchView: View {
         }
         .padding(4)
         .background {
-                        BeansGlass(shape: Capsule())
+            BeansSurface(shape: Capsule())
         }
         .clipShape(Capsule())
         .padding(.horizontal, 20)
@@ -403,7 +437,7 @@ struct SearchView: View {
                     historyStore.record(word)
                     Task { await startSearch(word) }
                 }
-                SectionHeader(title: "\(provider.rawValue)热搜")
+                SectionHeader(title: provider == .netease ? "网易云音乐热搜" : provider == .qq ? "QQ音乐热搜" : "酷狗音乐热搜")
                 if hotWords.isEmpty {
                     LoadingStateView()
                 } else {
@@ -513,11 +547,15 @@ struct SearchView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 8) {
-                        HStack {
-                            Text("找到 \(songResults.count) 首 · \(provider.rawValue)")
+                        HStack(spacing: 8) {
+                            Text(beansLocalized("找到 \(songResults.count) 首 · \(provider.rawValue)", "Found \(songResults.count) songs · \(beansPlatformName(provider))"))
                                 .font(BeansFont.appFont(12))
                                 .foregroundStyle(Color.beansComment)
-                            Spacer()
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.72)
+                                .truncationMode(.tail)
+                                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                                .layoutPriority(1)
                             Button {
                                 BeansHaptics.tap()
                                 player.play(songs: songResults, startAt: 0)
@@ -527,20 +565,22 @@ struct SearchView: View {
                                     .foregroundStyle(Color.beansAmber)
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 5)
-                                    .background { BeansGlass(shape: Capsule()) }
+                            .background { BeansSurface(shape: Capsule()) }
                             }
                             .buttonStyle(.plain)
+                            .fixedSize(horizontal: true, vertical: false)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 8)
                         ForEach(Array(songResults.enumerated()), id: \.element.identityKey) { index, song in
-                            SongCell(song: song) {
+                            SongCell(song: song, suppressNativeCleanRowGlass: isNativeClean) {
                                 BeansHaptics.tap()
                                 player.play(songs: songResults, startAt: index)
                             }
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
                             .background {
-                                                                BeansGlass(shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                BeansSurface(shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
                             }
                         }
                     }
@@ -550,13 +590,13 @@ struct SearchView: View {
                 }
                 .beansScrollIndicatorsHidden()
                 .beansScrollDismissesKeyboard()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .top) {
-                    if searching {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(Color.beansAmber)
-                            .padding(.top, 10)
-                    }
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(Color.beansAmber)
+                        .padding(.top, 10)
+                        .opacity(searching ? 1 : 0)
                 }
             }
         }
@@ -574,11 +614,16 @@ struct SearchView: View {
                 ScrollView {
                     LazyVStack(spacing: 8) {
                         HStack {
-                            Text("找到 \(artistResults.count) 位 · \(provider.rawValue)")
+                            Text(beansLocalized("找到 \(artistResults.count) 位 · \(provider.rawValue)", "Found \(artistResults.count) artists · \(beansPlatformName(provider))"))
                                 .font(BeansFont.appFont(12))
                                 .foregroundStyle(Color.beansComment)
-                            Spacer()
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.72)
+                                .truncationMode(.tail)
+                                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                                .layoutPriority(1)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 8)
                         ForEach(artistResults) { artist in
                             Button {
@@ -606,7 +651,7 @@ struct SearchView: View {
                                 .padding(.vertical, 8)
                                 .contentShape(Rectangle())
                                 .background {
-                                                                        BeansGlass(shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                BeansSurface(shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
                                 }
                             }
                             .buttonStyle(GlassPressButtonStyle(scale: 0.97))
@@ -618,13 +663,13 @@ struct SearchView: View {
                 }
                 .beansScrollIndicatorsHidden()
                 .beansScrollDismissesKeyboard()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .top) {
-                    if searching {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(Color.beansAmber)
-                            .padding(.top, 10)
-                    }
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(Color.beansAmber)
+                        .padding(.top, 10)
+                        .opacity(searching ? 1 : 0)
                 }
             }
         }
@@ -642,17 +687,23 @@ struct SearchView: View {
                 ScrollView {
                     LazyVStack(spacing: 8) {
                         HStack {
-                            Text("找到 \(albumResults.count) 张 · \(provider.rawValue)")
+                            Text(beansLocalized("找到 \(albumResults.count) 张 · \(provider.rawValue)", "Found \(albumResults.count) albums · \(beansPlatformName(provider))"))
                                 .font(BeansFont.appFont(12))
                                 .foregroundStyle(Color.beansComment)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.72)
+                                .truncationMode(.tail)
+                                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                                .layoutPriority(1)
                             Spacer()
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 8)
                         ForEach(albumResults) { album in
                             Button {
                                 BeansHaptics.tap()
                                 searchController.dismissKeyboard()
-                                searchBy(album.name)
+                                selectedAlbum = album
                             } label: {
                                 HStack(spacing: 12) {
                                     CoverImage(url: album.coverURL, size: 46, cornerRadius: 10)
@@ -666,7 +717,7 @@ struct SearchView: View {
                                             .foregroundStyle(Color.beansComment)
                                     }
                                     Spacer(minLength: 8)
-                                    Image(systemName: "magnifyingglass")
+                                    Image(systemName: "chevron.right")
                                         .font(.system(size: 13, weight: .semibold))
                                         .foregroundStyle(Color.beansComment)
                                 }
@@ -674,7 +725,7 @@ struct SearchView: View {
                                 .padding(.vertical, 8)
                                 .contentShape(Rectangle())
                                 .background {
-                                                                        BeansGlass(shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                BeansSurface(shape: RoundedRectangle(cornerRadius: 14, style: .continuous))
                                 }
                             }
                             .buttonStyle(GlassPressButtonStyle(scale: 0.97))
@@ -686,13 +737,13 @@ struct SearchView: View {
                 }
                 .beansScrollIndicatorsHidden()
                 .beansScrollDismissesKeyboard()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .top) {
-                    if searching {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(Color.beansAmber)
-                            .padding(.top, 10)
-                    }
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(Color.beansAmber)
+                        .padding(.top, 10)
+                        .opacity(searching ? 1 : 0)
                 }
             }
         }
@@ -736,62 +787,311 @@ struct SearchView: View {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         searchTask?.cancel()
+        let selectedProvider = provider
+        let selectedType = resultType
         searchTask = Task {
-            searching = true
-            errorMessage = nil
-            BeansLogger.shared.log("搜索：\(provider.rawValue) [\(resultType.rawValue)] \(trimmed)", level: .info)
-            defer { if !Task.isCancelled { searching = false } }
+            await MainActor.run {
+                searching = true
+                errorMessage = nil
+            }
+            BeansLogger.shared.log("搜索：\(selectedProvider.rawValue) [\(selectedType.rawValue)] \(trimmed)", level: .info)
+            defer {
+                if !Task.isCancelled {
+                    Task { @MainActor in searching = false }
+                }
+            }
             do {
-                switch (provider, resultType) {
+                switch (selectedProvider, selectedType) {
                 case (.netease, .song):
                     let songs = try await NetEaseAPI.shared.search(keyword: trimmed, limit: 40)
                     guard !Task.isCancelled else { return }
-                    songResults = songs
-                    if !songs.isEmpty { BeansHaptics.success() }
+                    await MainActor.run {
+                        songResults = songs
+                        if !songs.isEmpty { BeansHaptics.success() }
+                    }
                 case (.netease, .artist):
                     let artists = try await NetEaseAPI.shared.searchArtists(keyword: trimmed)
                     guard !Task.isCancelled else { return }
-                    artistResults = artists
+                    await MainActor.run { artistResults = artists }
                 case (.netease, .album):
                     let albums = try await NetEaseAPI.shared.searchAlbums(keyword: trimmed)
                     guard !Task.isCancelled else { return }
-                    albumResults = albums
+                    await MainActor.run { albumResults = albums }
                 case (.qq, .song):
                     let songs = try await QQMusicAPI.shared.searchSongs(keyword: trimmed)
                     guard !Task.isCancelled else { return }
-                    songResults = songs
-                    if !songs.isEmpty { BeansHaptics.success() }
+                    await MainActor.run {
+                        songResults = songs
+                        if !songs.isEmpty { BeansHaptics.success() }
+                    }
                 case (.qq, .artist):
                     let artists = try await QQMusicAPI.shared.searchArtists(keyword: trimmed)
                     guard !Task.isCancelled else { return }
-                    artistResults = artists
+                    await MainActor.run { artistResults = artists }
                 case (.qq, .album):
                     let albums = try await QQMusicAPI.shared.searchAlbums(keyword: trimmed)
                     guard !Task.isCancelled else { return }
-                    albumResults = albums
+                    await MainActor.run { albumResults = albums }
                 case (.kugou, .song):
                     let songs = try await KugouMusicAPI.shared.searchSongs(keyword: trimmed, limit: 40)
                     guard !Task.isCancelled else { return }
-                    songResults = songs
-                    if !songs.isEmpty { BeansHaptics.success() }
+                    await MainActor.run {
+                        songResults = songs
+                        if !songs.isEmpty { BeansHaptics.success() }
+                    }
                 case (.kugou, .artist):
                     let artists = try await KugouMusicAPI.shared.searchArtists(keyword: trimmed)
                     guard !Task.isCancelled else { return }
-                    artistResults = artists
+                    await MainActor.run { artistResults = artists }
                 case (.kugou, .album):
                     let albums = try await KugouMusicAPI.shared.searchAlbums(keyword: trimmed)
                     guard !Task.isCancelled else { return }
-                    albumResults = albums
+                    await MainActor.run { albumResults = albums }
                 }
-                let count = resultType == .song ? songResults.count : (resultType == .artist ? artistResults.count : albumResults.count)
-                BeansLogger.shared.log("搜索完成：\(provider.rawValue) [\(resultType.rawValue)] \(trimmed) 结果=\(count)", level: .info)
+                let count = await MainActor.run {
+                    selectedType == .song ? songResults.count : (selectedType == .artist ? artistResults.count : albumResults.count)
+                }
+                BeansLogger.shared.log("搜索完成：\(selectedProvider.rawValue) [\(selectedType.rawValue)] \(trimmed) 结果=\(count)", level: .info)
             } catch {
                 guard !Task.isCancelled else { return }
-                errorMessage = error.localizedDescription
-                BeansLogger.shared.log("搜索失败：\(provider.rawValue) \(trimmed) - \(error.localizedDescription)", level: .error)
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                }
+                BeansLogger.shared.log("搜索失败：\(selectedProvider.rawValue) \(trimmed) - \(error.localizedDescription)", level: .error)
             }
         }
         await searchTask?.value
+    }
+}
+
+/// 专辑详情页：点击搜索结果直接进入专辑内容，不再把专辑名当作歌曲关键词重新搜索。
+struct AlbumDetailView: View {
+    let album: Album
+    @EnvironmentObject private var player: PlayerManager
+    @EnvironmentObject private var theme: ThemeStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var tracks: [Song] = []
+    @State private var isLoading = true
+    @State private var errorMessage: String?
+
+    var body: some View {
+        BeansNavigationStack {
+            ZStack {
+                GlassBackdrop(customColor: theme.backgroundSyncAll ? theme.customBackground : nil)
+                if isLoading {
+                    LoadingStateView()
+                } else if let errorMessage {
+                    ErrorStateView(message: errorMessage) { Task { await load() } }
+                } else {
+                    List {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(spacing: 14) {
+                                CoverImage(url: album.coverURL, size: 92, cornerRadius: 16)
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(album.name)
+                                        .font(BeansFont.appFont(19, .bold))
+                                        .foregroundStyle(Color.beansLabel)
+                                        .lineLimit(2)
+                                    Text(album.artistName.isEmpty ? "未知歌手" : album.artistName)
+                                        .font(BeansFont.appFont(13))
+                                        .foregroundStyle(Color.beansComment)
+                                    Text(beansSongCountText(tracks.count))
+                                        .font(BeansFont.appFont(12))
+                                        .foregroundStyle(Color.beansComment)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            if !tracks.isEmpty {
+                                GlassButton(title: "播放全部", systemName: "play.fill", prominent: true) {
+                                    player.play(songs: tracks, startAt: 0)
+                                }
+                            }
+                        }
+                        .padding(.vertical, 10)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+
+                        ForEach(Array(tracks.enumerated()), id: \.element.identityKey) { index, song in
+                            SongCell(song: song, glassRow: true, playbackContext: tracks, playbackIndex: index) {
+                                player.play(songs: tracks, startAt: index)
+                            }
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                        }
+                    }
+                    .listStyle(.plain)
+                    .beansScrollContentBackgroundHidden()
+                }
+            }
+            .navigationTitle(album.name)
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .task { await load() }
+    }
+
+    private func load() async {
+        let cache = DetailSongsCache.shared
+        let cacheKey = "album-\(album.source.rawValue)-\(album.id)"
+        if let cached = cache.cachedSongs(for: cacheKey) {
+            await MainActor.run {
+                tracks = cached.songs
+                isLoading = false
+                errorMessage = nil
+            }
+            if cache.isFresh(cached) {
+                return
+            }
+        }
+        await MainActor.run {
+            if tracks.isEmpty {
+                isLoading = true
+            }
+            errorMessage = nil
+        }
+        do {
+            let result: [Song]
+            switch album.source {
+            case .netease:
+                guard let id = Int(album.id.replacingOccurrences(of: "netease-", with: "")) else {
+                    throw NSError(domain: "BeansAlbum", code: 1, userInfo: [NSLocalizedDescriptionKey: "专辑 ID 无效"])
+                }
+                let direct = (try? await NetEaseAPI.shared.albumSongs(albumID: id)) ?? []
+                if !direct.isEmpty {
+                    result = direct
+                } else {
+                    result = await searchFallbackSongs(
+                        queries: [albumSearchQuery, album.name],
+                        search: { query in
+                            (try? await NetEaseAPI.shared.search(keyword: query, limit: 100)) ?? []
+                        }
+                    )
+                }
+            case .qq:
+                result = await searchFallbackSongs(
+                    queries: [albumSearchQuery, album.name],
+                    search: { query in
+                        (try? await QQMusicAPI.shared.searchSongs(keyword: query, limit: 100)) ?? []
+                    }
+                )
+            case .kugou:
+                result = await searchFallbackSongs(
+                    queries: [albumSearchQuery, album.name],
+                    search: { query in
+                        (try? await KugouMusicAPI.shared.searchSongs(keyword: query, limit: 100)) ?? []
+                    }
+                )
+            }
+            if !result.isEmpty {
+                cache.save(result, for: cacheKey)
+            }
+            await MainActor.run {
+                tracks = result
+                isLoading = false
+                if result.isEmpty { errorMessage = "未找到专辑歌曲" }
+            }
+        } catch {
+            await MainActor.run {
+                if tracks.isEmpty {
+                    errorMessage = error.localizedDescription
+                } else {
+                    BeansLogger.shared.log(
+                        "专辑详情后台刷新失败，继续使用缓存 album=\(album.id) error=\(error.localizedDescription)",
+                        level: .warn
+                    )
+                }
+                isLoading = false
+            }
+        }
+    }
+
+    private var albumSearchQuery: String {
+        let artist = album.artistName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return artist.isEmpty ? album.name : "\(artist) \(album.name)"
+    }
+
+    private func searchFallbackSongs(
+        queries: [String],
+        search: (String) async -> [Song]
+    ) async -> [Song] {
+        guard !normalizedArtist(album.artistName).isEmpty else {
+            BeansLogger.shared.log(
+                "专辑详情筛选跳过：缺少目标歌手，平台=\(album.source.rawValue) 专辑=\(album.name)",
+                level: .debug
+            )
+            return []
+        }
+        var tried = Set<String>()
+        for query in queries {
+            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, tried.insert(trimmed).inserted else { continue }
+            let songs = await search(trimmed)
+            let matches = songs.filter(albumSongMatches)
+            BeansLogger.shared.log(
+                "专辑详情筛选：平台=\(album.source.rawValue) 查询=\(trimmed) 原始=\(songs.count) 专辑歌手匹配=\(matches.count)",
+                level: .debug
+            )
+            if !matches.isEmpty {
+                var seen = Set<String>()
+                return matches.filter { seen.insert($0.identityKey).inserted }
+            }
+        }
+        // Do not display an artist's unrelated songs just because the album-name
+        // search returned something. An empty result is safer than a wrong album.
+        return []
+    }
+
+    private func albumSongMatches(_ song: Song) -> Bool {
+        guard albumNamesMatch(song.album, album.name) else { return false }
+        return artistsMatch(expected: album.artistName, actual: song.artists)
+    }
+
+    private func normalizedArtist(_ value: String) -> String {
+        value
+            .lowercased()
+            .replacingOccurrences(of: "（", with: "(")
+            .replacingOccurrences(of: "）", with: ")")
+            .replacingOccurrences(of: #"[（(].*?[）)]"#, with: "", options: .regularExpression)
+            .filter { !$0.isWhitespace && !$0.isPunctuation }
+    }
+
+    private func artistTokens(_ value: String) -> [String] {
+        let separators = CharacterSet(charactersIn: "/／,，、&＆+＋|｜;；")
+        return value
+            .components(separatedBy: separators)
+            .map(normalizedArtist)
+            .filter { !$0.isEmpty }
+    }
+
+    private func artistsMatch(expected: String, actual: String) -> Bool {
+        let expectedTokens = artistTokens(expected)
+        let actualTokens = artistTokens(actual)
+        guard !expectedTokens.isEmpty, !actualTokens.isEmpty else { return false }
+
+        // A song may add a featured artist, so one exact primary-artist token is
+        // sufficient. Prefix matching is limited to longer names to avoid
+        // treating an unrelated short name as the same artist.
+        return expectedTokens.contains { expectedToken in
+            actualTokens.contains { actualToken in
+                if expectedToken == actualToken { return true }
+                guard min(expectedToken.count, actualToken.count) >= 3 else { return false }
+                return expectedToken.hasPrefix(actualToken) || actualToken.hasPrefix(expectedToken)
+            }
+        }
+    }
+
+    private func albumNamesMatch(_ lhs: String, _ rhs: String) -> Bool {
+        func normalized(_ value: String) -> String {
+            value
+                .lowercased()
+                .replacingOccurrences(of: "（", with: "(")
+                .replacingOccurrences(of: "）", with: ")")
+                .replacingOccurrences(of: "[（(].*?[）)]", with: "", options: .regularExpression)
+                .filter { !$0.isWhitespace && $0 != "-" && $0 != "·" }
+        }
+        let a = normalized(lhs)
+        let b = normalized(rhs)
+        guard !a.isEmpty, !b.isEmpty else { return false }
+        return a == b || a.contains(b) || b.contains(a)
     }
 }
 
@@ -836,7 +1136,7 @@ struct SearchTextField: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UITextField {
         let field = UITextField()
-        field.placeholder = placeholder
+        field.placeholder = NSLocalizedString(placeholder, comment: "")
         field.font = BeansFont.appUIFont(15)
         field.textColor = textColor
         field.autocorrectionType = .no
@@ -844,6 +1144,8 @@ struct SearchTextField: UIViewRepresentable {
         field.spellCheckingType = .no
         field.returnKeyType = .search
         field.clearButtonMode = .never
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         field.delegate = context.coordinator
         field.text = text
         field.addTarget(context.coordinator, action: #selector(Coordinator.textChanged(_:)), for: .editingChanged)
@@ -859,6 +1161,8 @@ struct SearchTextField: UIViewRepresentable {
         }
         uiView.font = BeansFont.appUIFont(15)
         uiView.textColor = textColor
+        uiView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        uiView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     }
 
     final class Coordinator: NSObject, UITextFieldDelegate {

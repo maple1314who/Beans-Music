@@ -14,6 +14,9 @@ struct ProfileView: View {
     @EnvironmentObject private var auth: AuthStore
     @EnvironmentObject private var player: PlayerManager
     @AppStorage("beans.themeMode") private var themeModeRaw = BeansThemeMode.system.rawValue
+    @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
+    @AppStorage("beans.homeHeaderHideSort") private var homeHeaderHideSort = false
+    @AppStorage("beans.pauseHomeRendering") private var homeRenderingPaused = false
 
     @State private var showHistory = false
 
@@ -24,8 +27,6 @@ struct ProfileView: View {
     @State private var showSectionSort = false
     /// 我的界面板块顺序（账号 / 关于，可自定义）
     @State private var profileOrder = SectionOrderStore.load(SectionOrderStore.profileKey, defaults: SectionOrderStore.profileDefaults)
-    /// 软件使用说明
-    @State private var showUsageGuide = false
     /// 手动检查更新
     @State private var checkingUpdate = false
     @State private var updateResult: UpdateChecker.CheckResult?
@@ -39,12 +40,32 @@ struct ProfileView: View {
     @State private var updateShareFile: ShareFileItem?
     @State private var updateShareFileURL: URL?
     @State private var didRefreshProfileAccount = false
+    @State private var donationExpanded = false
+    @State private var showWeChatOpenError = false
     @ObservedObject private var qqAuth = QQMusicAuth.shared
     @ObservedObject private var kugouAuth = KugouMusicAuth.shared
     @ObservedObject private var platformPrefs = PlatformPreferenceStore.shared
+    @AppStorage("beans.language") private var languageRaw = AppLanguage.chinese.rawValue
 
     private var themeMode: BeansThemeMode {
         BeansThemeMode(rawValue: themeModeRaw) ?? .system
+    }
+
+    private var isNativeClean: Bool {
+        BeansUIStyle(rawValue: uiStyleRaw) == .nativeClean
+    }
+
+    private var isEnglish: Bool { languageRaw == AppLanguage.english.rawValue }
+
+    private var displayPlatformSummary: String {
+        if !isEnglish { return platformPrefs.summaryText }
+        return platformPrefs.enabledSearchProviders.map { provider in
+            switch provider {
+            case .netease: return "NetEase Cloud Music"
+            case .qq: return "QQ Music"
+            case .kugou: return "Kugou Music"
+            }
+        }.joined(separator: " / ")
     }
 
     private var appVersionText: String {
@@ -57,18 +78,20 @@ struct ProfileView: View {
         var parts: [String] = []
         if platformPrefs.isEnabled(SearchProvider.netease), auth.isLoggedIn {
             if let nick = auth.user?.nickname, !nick.isEmpty {
-                parts.append("网易云 \(nick)")
+                parts.append("网易云音乐 \(nick)")
             } else {
-                parts.append("网易云 UID \(auth.user?.uid ?? 0)")
+                parts.append("网易云音乐 UID \(auth.user?.uid ?? 0)")
             }
         }
         if platformPrefs.isEnabled(SearchProvider.qq), qqAuth.isLoggedIn {
-            parts.append(qqAuth.nickname.isEmpty ? "QQ 已登录" : qqAuth.nickname)
+                parts.append(qqAuth.nickname.isEmpty ? (isEnglish ? "QQ Music Logged In" : "QQ 已登录") : qqAuth.nickname)
         }
         if platformPrefs.isEnabled(SearchProvider.kugou), kugouAuth.isLoggedIn {
-            parts.append(kugouAuth.nickname.isEmpty ? "酷狗已登录" : kugouAuth.nickname)
+                parts.append(kugouAuth.nickname.isEmpty ? (isEnglish ? "Kugou Music Logged In" : "酷狗已登录") : kugouAuth.nickname)
         }
-        if parts.isEmpty { return "登录后可同步 \(platformPrefs.summaryText) 歌单" }
+        if parts.isEmpty {
+            return isEnglish ? "Sign in to sync \(displayPlatformSummary) playlists" : "登录后可同步 \(platformPrefs.summaryText) 歌单"
+        }
         return parts.joined(separator: " · ")
     }
 
@@ -85,23 +108,58 @@ struct ProfileView: View {
                 Text("我的")
                     .font(BeansFont.appFont(30, .bold))
                     .foregroundStyle(Color.beansLabel)
-                Text("\(platformPrefs.summaryText) 账号与外观设置")
+            Text(isEnglish ? "\(displayPlatformSummary) account and appearance settings" : "\(platformPrefs.summaryText) 账号与外观设置")
                     .font(BeansFont.appFont(13))
                     .foregroundStyle(Color.beansComment)
             }
             Spacer()
             HStack(spacing: 10) {
-                GlassIconButton(systemName: "arrow.up.arrow.down") {
-                    BeansHaptics.tap()
-                    showSectionSort = true
+                if !homeHeaderHideSort {
+                    GlassIconButton(systemName: "arrow.up.arrow.down", forceLiquid: isNativeClean) {
+                        BeansHaptics.tap()
+                        showSectionSort = true
+                    }
                 }
-                GlassIconButton(systemName: "gearshape.fill") {
+                GlassIconButton(systemName: "gearshape.fill", forceLiquid: true) {
                     BeansHaptics.tap()
+                    homeRenderingPaused = true
                     showSettings = true
                 }
             }
         }
         .padding(.top, 8)
+    }
+
+    private var appleHeader: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .center) {
+                Text("我的")
+                    .font(BeansFont.appFont(38, .bold))
+                    .foregroundStyle(Color.beansLabel)
+                Spacer(minLength: 12)
+                if !homeHeaderHideSort {
+                    GlassIconButton(systemName: "arrow.up.arrow.down", forceLiquid: isNativeClean) {
+                        BeansHaptics.tap()
+                        showSectionSort = true
+                    }
+                }
+                GlassIconButton(systemName: "gearshape", forceLiquid: true) {
+                    BeansHaptics.tap()
+                    homeRenderingPaused = true
+                    showSettings = true
+                }
+            }
+            Text(LocalizedStringKey(accountStatusLine))
+                .font(BeansFont.appFont(12, .medium))
+                .foregroundStyle(Color.beansComment)
+                .lineLimit(2)
+                .minimumScaleFactor(0.8)
+                .truncationMode(.tail)
+            Rectangle()
+                .fill(Color.beansLabel.opacity(0.10))
+                .frame(height: 1)
+        }
+        .padding(.top, 4)
     }
 
     var body: some View {
@@ -112,25 +170,34 @@ struct ProfileView: View {
             // 实例级 UITabBar 清透风格（固定全透明，无需调节）
             TabBarAppearanceConfigurator()
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    header
+                LazyVStack(alignment: .leading, spacing: isNativeClean ? 26 : 22) {
+                    if isNativeClean {
+                        appleHeader
+                    } else {
+                        header
+                    }
                     // 板块按用户自定义顺序渲染（可拖拽排序）
                     ForEach(profileOrder, id: \.self) { key in
                         switch key {
                         case "账号":
                             userCard
                         case "关于":
-                            aboutSection
+                            EmptyView()
                         default:
                             EmptyView()
                         }
                     }
                     // 更新入口固定放在“我的”页面最底部，避免被板块排序隐藏。
                     updateLinkCard
+                    communityCard
+                    donationCard
+                    profileVersionFooter
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
+                .padding(.horizontal, isNativeClean ? 24 : 16)
+                .padding(.top, isNativeClean ? 14 : 8)
                 .padding(.bottom, 190)
+                .frame(maxWidth: 860)
+                .frame(maxWidth: .infinity)
             }
             .beansScrollIndicatorsHidden()
         }
@@ -142,27 +209,44 @@ struct ProfileView: View {
                 await qqAuth.fetchVIPStatus()
             }
         }
+        .background {
+            HighRefreshConfigurator()
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+        }
+        .alert("无法打开微信", isPresented: $showWeChatOpenError) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text("请使用微信扫描上方二维码完成赞助。")
+        }
         .sheet(isPresented: $showHistory) {
             HistoryView()
                 .environmentObject(player)
                 .environmentObject(auth)
+                .environmentObject(theme)
         }
         .sheet(isPresented: $showAccountHub) {
             AccountHubSheet()
                 .environmentObject(auth)
                 .environmentObject(theme)
         }
-        .sheet(isPresented: $showSettings) {
+        .fullScreenCover(isPresented: $showSettings) {
             SettingsView()
                 .environmentObject(theme)
                 .environmentObject(player)
+                .ignoresSafeArea(.all)
         }
         .sheet(isPresented: $showSectionSort) {
-            SectionOrderSheet(title: "我的板块排序", sections: SectionOrderStore.profileDefaults, order: $profileOrder)
+            SectionOrderSheet(
+                title: "我的板块排序",
+                sections: SectionOrderStore.profileDefaults,
+                order: $profileOrder,
+                platformOrder: Binding(
+                    get: { platformPrefs.orderedRaw },
+                    set: { platformPrefs.orderedRaw = $0 }
+                )
+            )
                 .onDisappear { SectionOrderStore.save(SectionOrderStore.profileKey, profileOrder) }
-        }
-        .sheet(isPresented: $showUsageGuide) {
-            UsageGuideSheet()
         }
         .sheet(item: $updateShareFile, onDismiss: cleanupUpdateShareFile) { item in
             ShareSheet(items: [item.url])
@@ -184,7 +268,7 @@ struct ProfileView: View {
             case .upToDate:
                 Text("当前已是最新版本 \(UpdateChecker.currentVersion)")
             case .failed:
-                Text("检查失败，请检查网络后重试\n如果长时间无反应，可能需要特殊网络环境（代理 / VPN）才能访问 GitHub")
+                Text("检查失败，请检查网络后重试")
             }
         }
         .overlay {
@@ -207,7 +291,7 @@ struct ProfileView: View {
             case .success(let fileName):
                 Text("新版 IPA 已下载完成，但未能打开分享面板。\n文件名：\(fileName)")
             case .failure(let message):
-                Text("下载失败：\(message)\n如果长时间无反应，可能需要特殊网络环境（代理 / VPN）才能访问 GitHub")
+                Text("下载失败：\(message)")
             }
         }
     }
@@ -235,14 +319,11 @@ struct ProfileView: View {
                 } else {
                     ProgressView()
                         .tint(Color.beansAmber)
-                    Text("正在连接下载服务器…")
+                    Text("正在获取更新…")
                         .font(BeansFont.appFont(12))
                         .foregroundStyle(Color.beansComment)
                 }
-                Text("下载完成后将自动打开系统分享面板")
-                    .font(BeansFont.appFont(11))
-                    .foregroundStyle(Color.beansComment.opacity(0.8))
-                    .multilineTextAlignment(.center)
+                EmptyView()
             }
             .padding(22)
             .frame(maxWidth: 300)
@@ -279,7 +360,7 @@ struct ProfileView: View {
 
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
-                            Text(auth.user?.nickname ?? (auth.isLoggedIn ? "网易云已登录" : "免登录 · 点击登录"))
+                            Text(auth.user?.nickname ?? (auth.isLoggedIn ? (isEnglish ? "NetEase Cloud Music Logged In" : "网易云音乐已登录") : (isEnglish ? "Guest · Tap to Sign In" : "免登录 · 点击登录")))
                                 .font(BeansFont.appFont(20, .bold))
                                 .foregroundStyle(Color.beansLabel)
                                 .lineLimit(1)
@@ -318,7 +399,7 @@ struct ProfileView: View {
     private var platformStatusRow: some View {
         VStack(alignment: .leading, spacing: 8) {
             if platformPrefs.isEnabled(SearchProvider.netease), auth.isLoggedIn {
-                platformChip(imageName: "BrandNetease", name: "网易云", status: auth.user?.nickname ?? "已登录", badge: auth.user?.vipBadge)
+                platformChip(imageName: "BrandNetease", name: "网易云音乐", status: auth.user?.nickname ?? "已登录", badge: auth.user?.vipBadge)
             }
             if platformPrefs.isEnabled(SearchProvider.qq), qqAuth.isLoggedIn {
                 platformChip(imageName: "BrandQQ", name: "QQ 音乐", status: qqAuth.nickname.isEmpty ? "已登录" : qqAuth.nickname, badge: qqAuth.vipBadge)
@@ -343,13 +424,14 @@ struct ProfileView: View {
                 .font(BeansFont.appFont(11))
                 .foregroundStyle(Color.beansComment)
                 .lineLimit(1)
+                .minimumScaleFactor(0.75)
             if let badge {
                 VIPBadgeView(text: badge)
             }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(.ultraThinMaterial, in: Capsule())
+        .background { BeansSurface(shape: Capsule()) }
     }
 
 
@@ -379,7 +461,7 @@ struct ProfileView: View {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 18))
                             .foregroundStyle(Color.beansAmber)
-                            .background(Circle().fill(.ultraThinMaterial))
+                            .background { BeansSurface(shape: Circle()) }
                             .padding(5)
                     }
                 }
@@ -394,7 +476,7 @@ struct ProfileView: View {
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Color.beansComment)
                     .frame(width: 28, height: 28)
-                    .background(Circle().fill(.ultraThinMaterial))
+                    .background { BeansSurface(shape: Circle()) }
                     .clipShape(Circle())
                     .contentShape(Circle())
                     .padding(6)
@@ -409,10 +491,10 @@ struct ProfileView: View {
         VStack(alignment: .leading, spacing: 12) {
             SectionHeader(title: "我的功能")
             VStack(spacing: 12) {
-                featureCell(icon: "clock.arrow.circlepath", title: "播放历史", subtitle: "最近播放 \(player.history.count) 首") {
+                featureCell(icon: "clock.arrow.circlepath", title: "播放历史", subtitle: String(format: NSLocalizedString("最近播放 %d 首", comment: ""), player.history.count)) {
                     showHistory = true
                 }
-                featureCell(icon: hasVisibleAccountLogin ? "checkmark.seal.fill" : "globe", title: "账号与登录", subtitle: hasVisibleAccountLogin ? accountStatusLine : "登录 \(platformPrefs.summaryText)") {
+                featureCell(icon: hasVisibleAccountLogin ? "checkmark.seal.fill" : "globe", title: isEnglish ? "Accounts and Sign-in" : "账号与登录", subtitle: hasVisibleAccountLogin ? accountStatusLine : (isEnglish ? "Sign in to \(displayPlatformSummary)" : "登录 \(platformPrefs.summaryText)")) {
                     BeansHaptics.tap()
                     showAccountHub = true
                 }
@@ -432,14 +514,17 @@ struct ProfileView: View {
                     .frame(width: 34, height: 34)
                     .background(Color.beansGlassFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
+                    Text(LocalizedStringKey(title))
                         .font(BeansFont.appFont(14, .semibold))
                         .foregroundStyle(Color.beansLabel)
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.82)
                     Text(subtitle)
                         .font(BeansFont.appFont(11))
                         .foregroundStyle(Color.beansComment)
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.78)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
             }
@@ -452,110 +537,6 @@ struct ProfileView: View {
         .buttonStyle(GlassPressButtonStyle(scale: 0.97))
     }
 
-
-    /// 软件使用说明入口
-    private var usageGuideCard: some View {
-        Button {
-            BeansHaptics.tap()
-            showUsageGuide = true
-        } label: {
-            HStack(spacing: 14) {
-                Image(systemName: "questionmark.circle.fill")
-                    .font(.system(size: 15))
-                    .foregroundStyle(Color.beansAmber)
-                    .frame(width: 30)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("软件使用说明")
-                        .font(BeansFont.appFont(15, .semibold))
-                        .foregroundStyle(Color.beansLabel)
-                    Text("了解多平台切换、账号、播放与个性化玩法")
-                        .font(BeansFont.appFont(11))
-                        .foregroundStyle(Color.beansComment)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.beansComment.opacity(0.6))
-            }
-            .padding(16)
-            .background {
-                                BeansGlass(shape: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            }
-        }
-        .buttonStyle(.plain)
-        .beansCardShadow(radius: 9, y: 3)
-    }
-
-    private var aboutSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionHeader(title: "关于")
-            VStack(spacing: 8) {
-                Label(appVersionText, systemImage: "beats.headphones")
-                    .font(BeansFont.appFont(14, .semibold))
-                    .foregroundStyle(Color.beansLabel)
-                Text("网易云 / QQ音乐 / 酷狗音乐 第三方客户端 · 仅供学习研究")
-                    .font(BeansFont.appFont(12))
-                    .foregroundStyle(Color.beansComment)
-                    .multilineTextAlignment(.center)
-                Text("只用作个人学习研究，禁止用于商业及非法用途，如产生法律纠纷与本人无关")
-                    .font(BeansFont.appFont(11))
-                    .foregroundStyle(Color.beansComment.opacity(0.85))
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("本软件完全免费，全部功能开源 · GitHub：maple1314who/Beans-Music")
-                    .font(BeansFont.appFont(11, .semibold))
-                    .foregroundStyle(Color.beansAmber)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(16)
-            .background {
-                                BeansGlass(shape: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            }
-            .beansCardShadow(radius: 9, y: 3)
-
-            copyrightDisclosure
-
-        }
-    }
-
-    /// 版权声明（默认折叠，可展开查看）
-    private var copyrightDisclosure: some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("“QQ”、“QQ音乐”及企鹅形象等文字、图形和商业标识，其著作权或商标权归腾讯公司所有。QQ音乐享有对其平台授权音乐的版权，请勿随意下载、复制版权内容。具体内容请参考QQ音乐用户协议。")
-                Text("“网易云”、“网易云音乐”等文字、图形和商业标识，其著作权或商标权归网易所有。网易云音乐享有对其平台授权音乐的版权，请勿随意下载、复制版权内容。具体内容请参考网易云音乐用户协议。")
-                Text("“酷狗音乐”及其名称、图形和商业标识归酷狗音乐及相关权利方所有。酷狗音乐享有对其平台授权音乐的版权，请勿随意下载、复制版权内容。具体内容请参考酷狗音乐用户协议。")
-                Text("音乐 API 来自 GitHub 开源项目，非官方版 API；本软件不提供任何音频存储服务，如需下载音频，请支持正版！")
-            }
-            .font(BeansFont.appFont(11))
-            .foregroundStyle(Color.beansComment)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.top, 6)
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "doc.text.magnifyingglass")
-                    .font(.system(size: 14))
-                    .foregroundStyle(Color.beansAmber)
-                    .frame(width: 26)
-                Text("版权声明")
-                    .font(BeansFont.appFont(14, .semibold))
-                    .foregroundStyle(Color.beansLabel)
-                Spacer()
-            }
-            .padding(.vertical, 2)
-        }
-        .tint(Color.beansAmber)
-        .padding(16)
-        .background {
-                            BeansGlass(shape: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        }
-        .beansCardShadow(radius: 9, y: 3)
-    }
-
-    /// 自动下载新版 IPA（带进度浮层）
     private func startAutoDownload(info: UpdateChecker.ReleaseInfo, assetURL: URL) {
         showDownloadOverlay = true
         Task {
@@ -588,7 +569,7 @@ struct ProfileView: View {
         VStack(spacing: 0) {
             Button {
                 BeansHaptics.tap()
-                if let url = URL(string: "https://github.com/maple1314who/Beans-Music") {
+                if let url = URL(string: "https://github.com/XIaodou0416/Beans-Music") {
                     UIApplication.shared.open(url)
                 }
             } label: {
@@ -601,7 +582,7 @@ struct ProfileView: View {
                         Text("更新地址")
                             .font(BeansFont.appFont(14, .semibold))
                             .foregroundStyle(Color.beansLabel)
-                        Text("GitHub：maple1314who/Beans-Music")
+                        Text("GitHub：XIaodou0416/Beans-Music")
                             .font(BeansFont.appFont(11))
                             .foregroundStyle(Color.beansComment)
                             .lineLimit(1)
@@ -630,7 +611,6 @@ struct ProfileView: View {
                         checkingUpdate = false
                         updateResult = result
                         if case .update(let info) = result {
-                            // 发现新版：自动下载 IPA（无安装包时回退到更新提示）
                             pendingUpdateInfo = info
                             if let assetURL = info.assetURL {
                                 startAutoDownload(info: info, assetURL: assetURL)
@@ -654,9 +634,6 @@ struct ProfileView: View {
                         Text(checkingUpdate ? "正在检查…" : "检查更新")
                             .font(BeansFont.appFont(14, .semibold))
                             .foregroundStyle(Color.beansLabel)
-                        Text("检测 GitHub 最新版本")
-                            .font(BeansFont.appFont(11))
-                            .foregroundStyle(Color.beansComment)
                     }
                     Spacer()
                 }
@@ -671,6 +648,222 @@ struct ProfileView: View {
         .beansCardShadow(radius: 9, y: 3)
     }
 
+    /// 我的页底部交流群入口
+    private var communityCard: some View {
+        Button {
+            BeansHaptics.tap()
+            if let url = URL(string: "https://t.me/+k8oYhsIU4sgzOTM1") {
+                UIApplication.shared.open(url)
+            }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "person.2.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Color.beansHighlight)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("交流群")
+                        .font(BeansFont.appFont(14, .semibold))
+                        .foregroundStyle(Color.beansLabel)
+                    Text("点击跳转 Telegram")
+                        .font(BeansFont.appFont(11))
+                        .foregroundStyle(Color.beansComment)
+                }
+                Spacer()
+                Image(systemName: "arrow.up.forward.app")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.beansComment)
+            }
+            .padding(16)
+            .background {
+                BeansGlass(shape: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            }
+        }
+        .buttonStyle(GlassPressButtonStyle(scale: 0.98))
+        .beansCardShadow(radius: 9, y: 3)
+    }
+
+    private var profileVersionFooter: some View {
+        Text(appVersionText)
+            .font(BeansFont.appFont(11))
+            .foregroundStyle(Color.beansComment.opacity(0.7))
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.top, 2)
+    }
+
+    /// 我的页底部赞助入口与赞助排行榜
+    private var donationCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Button {
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                    donationExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "heart.circle.fill")
+                        .font(.system(size: 22))
+                        .foregroundStyle(Color.beansAmber)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("自愿赞助")
+                            .font(BeansFont.appFont(16, .bold))
+                            .foregroundStyle(Color.beansLabel)
+                        Text(donationExpanded ? "点击收起赞助信息" : "点击展开赞助信息")
+                            .font(BeansFont.appFont(11))
+                            .foregroundStyle(Color.beansComment)
+                    }
+                    Spacer()
+                    Image(systemName: donationExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.beansComment)
+                }
+            }
+            .buttonStyle(.plain)
+
+            if donationExpanded {
+                Image("DonationQR")
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: 300)
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.beansComment.opacity(0.14), lineWidth: 0.8)
+                }
+
+                Button {
+                    openWeChatPayment()
+                } label: {
+                    Label("打开微信", systemImage: "arrow.up.forward.app")
+                        .font(BeansFont.appFont(13, .semibold))
+                        .foregroundStyle(Color.beansAmber)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(Color.beansAmber.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(GlassPressButtonStyle(scale: 0.98))
+
+                VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("赞助人员")
+                        .font(BeansFont.appFont(15, .semibold))
+                        .foregroundStyle(Color.beansLabel)
+                    Spacer()
+                    Text("按金额排序")
+                        .font(BeansFont.appFont(11))
+                        .foregroundStyle(Color.beansComment)
+                }
+
+                ForEach(displayedDonors.indices, id: \.self) { index in
+                    let donor = displayedDonors[index]
+                    HStack(spacing: 10) {
+                        Text("\(index + 1)")
+                            .font(BeansFont.appFont(13, .bold))
+                            .foregroundStyle(index == 0 ? Color.beansAmber : Color.beansComment)
+                            .frame(width: 24, height: 24)
+                            .background(
+                                (index == 0 ? Color.beansAmber : Color.beansComment).opacity(index == 0 ? 0.16 : 0.08),
+                                in: Circle()
+                            )
+                        Text(donor.name)
+                            .font(BeansFont.appFont(13, .medium))
+                            .foregroundStyle(Color.beansLabel)
+                        Spacer()
+                        Text(String(format: "¥ %.2f", donor.amount))
+                            .font(BeansFont.appFont(13, .semibold))
+                            .foregroundStyle(index == 0 ? Color.beansAmber : Color.beansLabel)
+                    }
+                    if index < displayedDonors.count - 1 {
+                        Divider().overlay(Color.beansComment.opacity(0.12))
+                    }
+                }
+                }
+            }
+        }
+        .padding(16)
+        .background {
+            BeansGlass(shape: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        }
+        .beansCardShadow(radius: 9, y: 3)
+    }
+
+    private func openWeChatPayment() {
+        guard let paymentURL = URL(string: "wxp://f2f03Cvy7dWnLLRbIhQJqY-MxVACiIS4JBNSui8VmUk3_Qg") else {
+            showWeChatOpenError = true
+            return
+        }
+
+        UIApplication.shared.open(paymentURL, options: [:]) { opened in
+            guard !opened, let weChatURL = URL(string: "weixin://") else { return }
+            UIApplication.shared.open(weChatURL, options: [:]) { openedWeChat in
+                if !openedWeChat {
+                    showWeChatOpenError = true
+                }
+            }
+        }
+    }
+
+    private var displayedDonors: [Donor] {
+        Self.donors
+    }
+
+    private struct Donor {
+        let name: String
+        let amount: Double
+    }
+
+    private static let donors: [Donor] = [
+        Donor(name: "WeChat", amount: 26.66),
+        Donor(name: "Aert", amount: 8.88),
+        Donor(name: "wxx", amount: 5),
+        Donor(name: "！", amount: 3),
+    ]
+}
+
+// MARK: - 交流群二维码
+
+struct CommunityQRSheet: View {
+    @EnvironmentObject private var theme: ThemeStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        BeansNavigationStack {
+            ZStack {
+                GlassBackdrop(customColor: theme.backgroundSyncAll ? theme.customBackground : nil)
+                VStack(spacing: 18) {
+                    Image("CommunityQR")
+                        .resizable()
+                        .interpolation(.none)
+                        .scaledToFit()
+                        .padding(12)
+                        .background(Color.white, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .strokeBorder(Color.beansComment.opacity(0.16), lineWidth: 0.8)
+                        }
+                        .padding(.horizontal, 24)
+                    Text("扫码加入交流群")
+                        .font(BeansFont.appFont(15, .semibold))
+                        .foregroundStyle(Color.beansLabel)
+                    Text("如二维码过期，可在 GitHub 或更新说明中获取最新入口")
+                        .font(BeansFont.appFont(11))
+                        .foregroundStyle(Color.beansComment)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 30)
+                }
+                .padding(.vertical, 22)
+            }
+            .navigationTitle("交流群")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+        .modifier(BeansSheetModifier(detents: [.medium, .large]))
+    }
 }
 
 // MARK: - 统一账号登录面板（网易云 + QQ 音乐整合）
@@ -681,6 +874,7 @@ struct AccountHubSheet: View {
     @ObservedObject private var qqAuth = QQMusicAuth.shared
     @ObservedObject private var kugouAuth = KugouMusicAuth.shared
     @ObservedObject private var platformPrefs = PlatformPreferenceStore.shared
+    @AppStorage("beans.language") private var languageRaw = AppLanguage.chinese.rawValue
     @Environment(\.dismiss) private var dismiss
 
     @State private var showNeteaseLogin = false
@@ -689,6 +883,18 @@ struct AccountHubSheet: View {
     @State private var confirmNeteaseLogout = false
     @State private var confirmQQLogout = false
     @State private var confirmKugouLogout = false
+
+    private var isEnglish: Bool { languageRaw == AppLanguage.english.rawValue }
+    private var displayPlatformSummary: String {
+        if !isEnglish { return platformPrefs.summaryText }
+        return platformPrefs.enabledSearchProviders.map { provider in
+            switch provider {
+            case .netease: return "NetEase Cloud Music"
+            case .qq: return "QQ Music"
+            case .kugou: return "Kugou Music"
+            }
+        }.joined(separator: " / ")
+    }
 
     var body: some View {
         BeansNavigationStack {
@@ -700,7 +906,7 @@ struct AccountHubSheet: View {
                         if platformPrefs.isEnabled(SearchProvider.netease) { neteaseCard }
                         if platformPrefs.isEnabled(SearchProvider.qq) { qqCard }
                         if platformPrefs.isEnabled(SearchProvider.kugou) { kugouCard }
-                        Text("\(platformPrefs.summaryText) 登录后可同步歌单并提升可播成功率")
+                        Text(isEnglish ? "Sign in to \(displayPlatformSummary) to sync playlists and improve playback availability" : "\(platformPrefs.summaryText) 登录后可同步歌单并提升可播成功率")
                             .font(BeansFont.appFont(11))
                             .foregroundStyle(Color.beansComment)
                             .padding(.horizontal, 4)
@@ -778,10 +984,17 @@ struct AccountHubSheet: View {
                         .font(BeansFont.appFont(15, .semibold))
                         .foregroundStyle(Color.beansLabel)
                     HStack(spacing: 6) {
-                        Text(auth.isLoggedIn ? (auth.user?.nickname ?? "已登录") : "未登录 · 扫码登录同步歌单")
-                            .font(BeansFont.appFont(12))
-                            .foregroundStyle(Color.beansComment)
-                            .lineLimit(1)
+                        Group {
+                            if auth.isLoggedIn {
+                                Text(auth.user?.nickname ?? NSLocalizedString("已登录", comment: ""))
+                            } else {
+                                Text(LocalizedStringKey("未登录 · 扫码登录同步歌单"))
+                            }
+                        }
+                        .font(BeansFont.appFont(12))
+                        .foregroundStyle(Color.beansComment)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.8)
                         if auth.isLoggedIn, let badge = auth.user?.vipBadge {
                             VIPBadgeView(text: badge)
                         }
@@ -793,7 +1006,7 @@ struct AccountHubSheet: View {
                     .foregroundStyle(auth.isLoggedIn ? Color.red : Color.beansAmber)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .background { BeansSurface(shape: Capsule()) }
             }
             .padding(14)
             .background {
@@ -826,10 +1039,17 @@ struct AccountHubSheet: View {
                         .font(BeansFont.appFont(15, .semibold))
                         .foregroundStyle(Color.beansLabel)
                     HStack(spacing: 6) {
-                        Text(qqAuth.isLoggedIn ? (qqAuth.nickname.isEmpty ? "已登录" : qqAuth.nickname) : "未登录 · 网页 / 扫码 / Cookie 登录")
-                            .font(BeansFont.appFont(12))
-                            .foregroundStyle(Color.beansComment)
-                            .lineLimit(1)
+                        Group {
+                            if qqAuth.isLoggedIn {
+                                Text(qqAuth.nickname.isEmpty ? NSLocalizedString("已登录", comment: "") : qqAuth.nickname)
+                            } else {
+                                Text(LocalizedStringKey("未登录 · 网页 / 扫码 / Cookie 登录"))
+                            }
+                        }
+                        .font(BeansFont.appFont(12))
+                        .foregroundStyle(Color.beansComment)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.8)
                         if qqAuth.isLoggedIn, let badge = qqAuth.vipBadge {
                             VIPBadgeView(text: badge)
                         }
@@ -841,7 +1061,7 @@ struct AccountHubSheet: View {
                     .foregroundStyle(qqAuth.isLoggedIn ? Color.red : Color.beansAmber)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .background { BeansSurface(shape: Capsule()) }
             }
             .padding(14)
             .background {
@@ -869,10 +1089,17 @@ struct AccountHubSheet: View {
                         .font(BeansFont.appFont(15, .semibold))
                         .foregroundStyle(Color.beansLabel)
                     HStack(spacing: 6) {
-                        Text(kugouAuth.isLoggedIn ? (kugouAuth.nickname.isEmpty ? "已登录" : kugouAuth.nickname) : "未登录 · App 扫码同步歌单")
-                            .font(BeansFont.appFont(12))
-                            .foregroundStyle(Color.beansComment)
-                            .lineLimit(1)
+                        Group {
+                            if kugouAuth.isLoggedIn {
+                                Text(kugouAuth.nickname.isEmpty ? NSLocalizedString("已登录", comment: "") : kugouAuth.nickname)
+                            } else {
+                                Text(LocalizedStringKey("未登录 · App 扫码同步歌单"))
+                            }
+                        }
+                        .font(BeansFont.appFont(12))
+                        .foregroundStyle(Color.beansComment)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.8)
                         if kugouAuth.isLoggedIn, let badge = kugouAuth.vipBadge {
                             VIPBadgeView(text: badge)
                         }
@@ -884,7 +1111,7 @@ struct AccountHubSheet: View {
                     .foregroundStyle(kugouAuth.isLoggedIn ? Color.red : Color.beansAmber)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .background { BeansSurface(shape: Capsule()) }
             }
             .padding(14)
             .background {
@@ -902,53 +1129,320 @@ struct AccountHubSheet: View {
 struct SettingsView: View {
     @EnvironmentObject private var theme: ThemeStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
     @AppStorage("beans.themeMode") private var themeModeRaw = BeansThemeMode.system.rawValue
-    /// 音质等级（借鉴 Kumone）
-    @AppStorage("beans.audioQuality") private var audioQualityRaw = BeansAudioQuality.exhigh.rawValue
+    @AppStorage("beans.language") private var languageRaw = AppLanguage.chinese.rawValue
+    @AppStorage("beans.homeWallpaperBlur") private var homeWallpaperBlur = 0.0
     /// 底栏是否显示文字（关闭后只显示图标）
     @AppStorage("beans.tabLabelsVisible") private var tabLabelsVisible = true
     @AppStorage("beans.legacyTabCornerRadius") private var legacyTabCornerRadius = 32.0
     @AppStorage("beans.legacyTabWidth") private var legacyTabWidth = 356.0
     @AppStorage("beans.legacyTabOffsetX") private var legacyTabOffsetX = 0.0
     @AppStorage("beans.legacyTabOffsetY") private var legacyTabOffsetY = 0.0
-    /// 官方地址不可用时，是否尝试内置音源
-    @AppStorage("beans.enableUnblock") private var enableBuiltInSources = true
     /// 第三方音源播放会员歌成功时提醒，默认开启
     @AppStorage("beans.showThirdPartyVIPNotice") private var showThirdPartyVIPNotice = true
-    /// 可选高刷新率动效，默认开启；可手动关闭以降低发热
+    @AppStorage("beans.showSongVIPBadge") private var showSongVIPBadge = true
+    /// 高刷新率请求，默认开启
     @AppStorage("beans.enableHighRefresh") private var enableHighRefresh = true
     @AppStorage("beans.audio.mixothers.v1") private var mixesWithOthers = false
+    @AppStorage("beans.audioQuality") private var playbackAudioQualityRaw = BeansAudioQuality.hires.rawValue
+    @AppStorage(BeansHaptics.enabledKey) private var hapticsEnabled = true
+    @AppStorage("beans.playback.autoResumeLast") private var autoResumeLastPlayback = false
     @AppStorage("beans.labelColorHex") private var labelColorHex = ""
+    @AppStorage("beans.homeGreetingText") private var homeGreetingText = ""
+    @AppStorage("beans.homeGreetingSize") private var homeGreetingSize = 30.0
+    @AppStorage("beans.homeGreetingHeight") private var homeGreetingHeight = 0.0
+    @AppStorage("beans.homeGreetingColorHex") private var homeGreetingColorHex = ""
+    @AppStorage("beans.homeGreetingLine1Size") private var homeGreetingLine1Size = 0.0
+    @AppStorage("beans.homeGreetingLine2Size") private var homeGreetingLine2Size = 0.0
+    @AppStorage("beans.homeGreetingLine3Size") private var homeGreetingLine3Size = 0.0
+    @AppStorage("beans.homeGreetingLine1ColorHex") private var homeGreetingLine1ColorHex = ""
+    @AppStorage("beans.homeGreetingLine2ColorHex") private var homeGreetingLine2ColorHex = ""
+    @AppStorage("beans.homeGreetingLine3ColorHex") private var homeGreetingLine3ColorHex = ""
+    @AppStorage("beans.homeGreetingLine1OffsetY") private var homeGreetingLine1OffsetY = 0.0
+    @AppStorage("beans.homeGreetingLine2OffsetY") private var homeGreetingLine2OffsetY = 0.0
+    @AppStorage("beans.homeGreetingLine3OffsetY") private var homeGreetingLine3OffsetY = 0.0
+    @AppStorage("beans.homeGreetingLine1GradientStartHex") private var homeGreetingLine1GradientStartHex = ""
+    @AppStorage("beans.homeGreetingLine2GradientStartHex") private var homeGreetingLine2GradientStartHex = ""
+    @AppStorage("beans.homeGreetingLine3GradientStartHex") private var homeGreetingLine3GradientStartHex = ""
+    @AppStorage("beans.homeGreetingLine1GradientEndHex") private var homeGreetingLine1GradientEndHex = ""
+    @AppStorage("beans.homeGreetingLine2GradientEndHex") private var homeGreetingLine2GradientEndHex = ""
+    @AppStorage("beans.homeGreetingLine3GradientEndHex") private var homeGreetingLine3GradientEndHex = ""
+    @AppStorage("beans.homeGreetingGlowEnabled") private var homeGreetingGlowEnabled = false
+    @AppStorage("beans.homeGreetingGlowIntensity") private var homeGreetingGlowIntensity = 0.45
+    @AppStorage("beans.homeGreetingUnderline") private var homeGreetingUnderline = false
+    @AppStorage("beans.homeGreetingGradient") private var homeGreetingGradient = false
+    @AppStorage("beans.homeGreetingGradientStartHex") private var homeGreetingGradientStartHex = ""
+    @AppStorage("beans.homeGreetingGradientEndHex") private var homeGreetingGradientEndHex = ""
+    @AppStorage("beans.homeGreetingFont") private var homeGreetingFontName = ""
+    @AppStorage("beans.pauseHomeRendering") private var homeRenderingPaused = false
+    @AppStorage("beans.homeHideUsername") private var homeHideUsername = false
+    @AppStorage("beans.homeHeaderHideSort") private var homeHeaderHideSort = false
+    @AppStorage("beans.homeHeaderHideRefresh") private var homeHeaderHideRefresh = true
+    @AppStorage(PlatformPreferenceStore.hidePickerKey) private var hidePlatformPicker = false
     @ObservedObject private var sourceStore = UnblockSourceStore.shared
+    @ObservedObject private var equalizer = BeansEqualizer.shared
+    @AppStorage(ThirdPartyAudioQuality.storageKey) private var thirdPartyAudioQualityRaw = ThirdPartyAudioQuality.kb320.rawValue
     @ObservedObject private var platformPrefs = PlatformPreferenceStore.shared
 
     @State private var appearanceExpanded = false
     @State private var platformExpanded = false
     @State private var playbackExpanded = false
     @State private var showWallpaperPicker = false
+    @State private var wallpaperAppearanceTarget: BeansWallpaperAppearance = .light
     @State private var showFontImporter = false
+    @State private var showGreetingFontImporter = false
     /// 更新日志
     @State private var showChangelog = false
-    /// 配置备份与恢复
     @State private var backupDoc: BackupDocument?
     @State private var showExportBackup = false
     @State private var showRestorePicker = false
     @State private var pendingRestore: [String: Any]?
     @State private var showRestoreConfirm = false
-    @State private var showResetSettingsConfirm = false
+    @State private var showSourceManager = false
+    @State private var showEqualizer = false
+    @State private var backupExpanded = false
     @State private var backupIncludeAccounts = false
-    @State private var backupIncludeWallpapers = true
+    @State private var backupIncludeWallpapers = false
     @State private var backupMessage: String?
     /// 日志
     @State private var showLogViewer = false
-    @State private var showUsageGuide = false
 
     private var themeMode: BeansThemeMode {
         BeansThemeMode(rawValue: themeModeRaw) ?? .system
     }
 
-    private var presetSourceCount: Int {
-        sourceStore.presetSources.count
+    private var customSourceCount: Int {
+        sourceStore.managementVisibleSources.count
+    }
+
+    private var thirdPartyAudioQualityOptions: [ThirdPartyAudioQuality] {
+        let options = sourceStore.availableThirdPartyQualities()
+        return options.isEmpty ? ThirdPartyAudioQuality.allCases : options
+    }
+
+    private var thirdPartyAudioQualitySelection: Binding<ThirdPartyAudioQuality> {
+        Binding(
+            get: {
+                let stored = ThirdPartyAudioQuality(sourceValue: thirdPartyAudioQualityRaw) ?? .kb320
+                return thirdPartyAudioQualityOptions.first(where: { $0 == stored }) ?? thirdPartyAudioQualityOptions.first ?? .kb320
+            },
+            set: { newValue in
+                thirdPartyAudioQualityRaw = newValue.rawValue
+            }
+        )
+    }
+
+    private var thirdPartyAudioQualityTitle: String {
+        beansLocalized("第三方音源音质", "Third-party source quality")
+    }
+
+    private var thirdPartyAudioQualityHint: String {
+        beansLocalized("会优先按所选音质解析第三方音源，不可用时会自动降级。", "Third-party sources will try the selected quality first and downgrade automatically when unavailable.")
+    }
+
+    private var thirdPartyAudioQualityOptionsSignature: String {
+        thirdPartyAudioQualityOptions.map(\.rawValue).joined(separator: ",")
+    }
+
+    private func normalizeThirdPartyAudioQualitySelection() {
+        let valid = thirdPartyAudioQualityOptions.first(where: { $0.rawValue == thirdPartyAudioQualityRaw }) ?? thirdPartyAudioQualityOptions.first ?? .kb320
+        if valid.rawValue != thirdPartyAudioQualityRaw {
+            thirdPartyAudioQualityRaw = valid.rawValue
+        }
+    }
+
+    private var playbackAudioQualitySelection: Binding<BeansAudioQuality> {
+        Binding(
+            get: { BeansAudioQuality(rawValue: playbackAudioQualityRaw) ?? .hires },
+            set: { playbackAudioQualityRaw = $0.rawValue }
+        )
+    }
+
+    private var playbackQualitySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 9) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.beansAmber)
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(beansLocalized("播放音质", "Playback quality"))
+                        .font(BeansFont.appFont(14, .semibold))
+                        .foregroundStyle(Color.beansLabel)
+                    Text(beansLocalized("按列表选择，无法使用时会由平台自动降级。", "Choose a quality below; the platform will downgrade automatically when unavailable."))
+                        .font(BeansFont.appFont(10))
+                        .foregroundStyle(Color.beansComment)
+                        .lineLimit(1)
+                }
+                Spacer()
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(BeansAudioQuality.allCases) { quality in
+                        let selected = playbackAudioQualitySelection.wrappedValue == quality
+                        Button {
+                            playbackAudioQualitySelection.wrappedValue = quality
+                            BeansHaptics.select()
+                        } label: {
+                            HStack(spacing: 5) {
+                                Text(quality.displayName)
+                                if selected {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 9, weight: .bold))
+                                }
+                            }
+                            .font(BeansFont.appFont(12, selected ? .semibold : .medium))
+                            .foregroundStyle(selected ? Color.beansAmber : Color.beansLabel)
+                            .padding(.horizontal, 12)
+                            .frame(height: 31)
+                            .background {
+                                Capsule()
+                                    .fill(selected ? Color.beansAmber.opacity(0.14) : Color.beansLabel.opacity(0.055))
+                            }
+                            .overlay {
+                                Capsule()
+                                    .strokeBorder(selected ? Color.beansAmber.opacity(0.42) : Color.beansLabel.opacity(0.08), lineWidth: 0.8)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 1)
+            }
+        }
+    }
+
+    private var homeGreetingLines: [String] {
+        let custom = homeGreetingText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if custom.isEmpty { return ["自动问候"] }
+        return custom.components(separatedBy: .newlines)
+    }
+
+    private func greetingLineSizeBinding(_ index: Int) -> Binding<Double> {
+        Binding(
+            get: {
+                switch index {
+                case 0: return homeGreetingLine1Size > 0 ? homeGreetingLine1Size : homeGreetingSize
+                case 1: return homeGreetingLine2Size > 0 ? homeGreetingLine2Size : homeGreetingSize
+                default: return homeGreetingLine3Size > 0 ? homeGreetingLine3Size : homeGreetingSize
+                }
+            },
+            set: { value in
+                switch index {
+                case 0: homeGreetingLine1Size = value
+                case 1: homeGreetingLine2Size = value
+                default: homeGreetingLine3Size = value
+                }
+            }
+        )
+    }
+
+    private func greetingLineColorBinding(_ index: Int) -> Binding<Color> {
+        Binding(
+            get: {
+                let raw: String
+                switch index {
+                case 0: raw = homeGreetingLine1ColorHex
+                case 1: raw = homeGreetingLine2ColorHex
+                default: raw = homeGreetingLine3ColorHex
+                }
+                return Color(hex: raw) ?? (Color(hex: homeGreetingColorHex) ?? Color.beansLabel)
+            },
+            set: { color in
+                let hex = color.hexString
+                switch index {
+                case 0: homeGreetingLine1ColorHex = hex
+                case 1: homeGreetingLine2ColorHex = hex
+                default: homeGreetingLine3ColorHex = hex
+                }
+            }
+        )
+    }
+
+    private func greetingLineOffsetBinding(_ index: Int) -> Binding<Double> {
+        Binding(
+            get: {
+                switch index {
+                case 0: return homeGreetingLine1OffsetY
+                case 1: return homeGreetingLine2OffsetY
+                default: return homeGreetingLine3OffsetY
+                }
+            },
+            set: { value in
+                switch index {
+                case 0: homeGreetingLine1OffsetY = value
+                case 1: homeGreetingLine2OffsetY = value
+                default: homeGreetingLine3OffsetY = value
+                }
+            }
+        )
+    }
+
+    private func greetingLineGradientStartBinding(_ index: Int) -> Binding<Color> {
+        Binding(
+            get: {
+                let raw: String
+                switch index {
+                case 0: raw = homeGreetingLine1GradientStartHex
+                case 1: raw = homeGreetingLine2GradientStartHex
+                default: raw = homeGreetingLine3GradientStartHex
+                }
+                return Color(hex: raw) ?? (Color(hex: homeGreetingGradientStartHex) ?? Color.beansLabel)
+            },
+            set: { color in
+                switch index {
+                case 0: homeGreetingLine1GradientStartHex = color.hexString
+                case 1: homeGreetingLine2GradientStartHex = color.hexString
+                default: homeGreetingLine3GradientStartHex = color.hexString
+                }
+            }
+        )
+    }
+
+    private func greetingLineGradientEndBinding(_ index: Int) -> Binding<Color> {
+        Binding(
+            get: {
+                let raw: String
+                switch index {
+                case 0: raw = homeGreetingLine1GradientEndHex
+                case 1: raw = homeGreetingLine2GradientEndHex
+                default: raw = homeGreetingLine3GradientEndHex
+                }
+                return Color(hex: raw) ?? (Color(hex: homeGreetingGradientEndHex) ?? Color.beansLabel)
+            },
+            set: { color in
+                switch index {
+                case 0: homeGreetingLine1GradientEndHex = color.hexString
+                case 1: homeGreetingLine2GradientEndHex = color.hexString
+                default: homeGreetingLine3GradientEndHex = color.hexString
+                }
+            }
+        )
+    }
+
+    private func resetGreetingLineStyle(_ index: Int) {
+        switch index {
+        case 0:
+            homeGreetingLine1Size = 0
+            homeGreetingLine1ColorHex = ""
+            homeGreetingLine1OffsetY = 0
+            homeGreetingLine1GradientStartHex = ""
+            homeGreetingLine1GradientEndHex = ""
+        case 1:
+            homeGreetingLine2Size = 0
+            homeGreetingLine2ColorHex = ""
+            homeGreetingLine2OffsetY = 0
+            homeGreetingLine2GradientStartHex = ""
+            homeGreetingLine2GradientEndHex = ""
+        default:
+            homeGreetingLine3Size = 0
+            homeGreetingLine3ColorHex = ""
+            homeGreetingLine3OffsetY = 0
+            homeGreetingLine3GradientStartHex = ""
+            homeGreetingLine3GradientEndHex = ""
+        }
     }
 
     var body: some View {
@@ -956,19 +1450,20 @@ struct SettingsView: View {
             ZStack {
                 GlassBackdrop(customColor: theme.backgroundSyncAll ? theme.customBackground : nil)
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 22) {
-                        appearanceSection
-                        platformSection
+                    LazyVStack(alignment: .leading, spacing: 16) {
+                        themeSection
                         playbackSection
+                        equalizerSection
                         changelogSection
                         backupSection
                         logSection
-                        settingsUsageGuideSection
                         footerNote
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
                     .padding(.bottom, 40)
+                    .frame(maxWidth: 860)
+                    .frame(maxWidth: .infinity)
                 }
                 .beansScrollIndicatorsHidden()
             }
@@ -980,9 +1475,13 @@ struct SettingsView: View {
                 }
             }
         }
+        .preferredColorScheme(themeMode.colorScheme)
+        .onAppear {
+            wallpaperAppearanceTarget = colorScheme == .dark ? .dark : .light
+        }
         .sheet(isPresented: $showWallpaperPicker) {
             WallpaperPhotoPicker { data in
-                theme.addWallpaper(data)
+                theme.addWallpaper(data, for: wallpaperAppearanceTarget.colorScheme)
                 BeansHaptics.success()
             }
             .ignoresSafeArea()
@@ -993,11 +1492,15 @@ struct SettingsView: View {
             }
             .ignoresSafeArea()
         }
+        .fullScreenCover(isPresented: $showGreetingFontImporter) {
+            FontDocumentPicker { url in
+                installGreetingFont(from: url)
+            }
+            .ignoresSafeArea()
+        }
         .sheet(isPresented: $showChangelog) {
             ChangelogListView()
-        }
-        .sheet(isPresented: $showUsageGuide) {
-            UsageGuideSheet()
+                .environmentObject(theme)
         }
         .fileExporter(
             isPresented: $showExportBackup,
@@ -1016,6 +1519,15 @@ struct SettingsView: View {
         }
         .sheet(isPresented: $showLogViewer) {
             LogViewerSheet(importedText: nil)
+                .environmentObject(theme)
+        }
+        .sheet(isPresented: $showSourceManager) {
+            ThirdPartySourceManagerSheet()
+                .environmentObject(theme)
+        }
+        .sheet(isPresented: $showEqualizer) {
+            EqualizerSettingsView()
+                .environmentObject(theme)
         }
         .fullScreenCover(isPresented: $showRestorePicker) {
             BackupDocumentPicker { url in
@@ -1029,13 +1541,19 @@ struct SettingsView: View {
             }
             Button("取消", role: .cancel) {}
         }
-        .confirmationDialog("重置所有设置？", isPresented: $showResetSettingsConfirm, titleVisibility: .visible) {
-            Button("重置设置", role: .destructive) {
-                resetAllSettingsKeepingAccounts()
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("会恢复主题、播放器、平台显示、壁纸、布局等设置，但保留已登录账号。")
+        .onAppear {
+            homeRenderingPaused = true
+        }
+        .onDisappear {
+            homeRenderingPaused = false
+        }
+    }
+
+    /// 主题相关设置统一归组，避免平台和排行榜外观选项散落在设置页。
+    private var themeSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            appearanceSection
+            platformSection
         }
     }
 
@@ -1051,6 +1569,21 @@ struct SettingsView: View {
             ToastCenter.shared.show("字体已应用：\(name)")
         } else {
             ToastCenter.shared.show("字体安装失败，请使用 ttf / otf 文件")
+        }
+    }
+
+    private func installGreetingFont(from url: URL) {
+        let ext = url.pathExtension.lowercased()
+        guard ["ttf", "otf", "ttc"].contains(ext) else {
+            ToastCenter.shared.show("请选择 ttf / otf 字体文件")
+            return
+        }
+        if let name = FontManager.installGreeting(from: url) {
+            homeGreetingFontName = name
+            BeansHaptics.success()
+            ToastCenter.shared.show("主页问候字体已应用：\(name)")
+        } else {
+            ToastCenter.shared.show("主页问候字体安装失败，请使用 ttf / otf 文件")
         }
     }
 
@@ -1071,10 +1604,6 @@ struct SettingsView: View {
                         Text("平台显示")
                             .font(BeansFont.appFont(15))
                             .foregroundStyle(Color.beansLabel)
-                        Text(platformPrefs.summaryText)
-                            .font(BeansFont.appFont(11))
-                            .foregroundStyle(Color.beansComment)
-                            .lineLimit(1)
                     }
                     Spacer()
                     Image(systemName: platformExpanded ? "chevron.up" : "chevron.down")
@@ -1104,7 +1633,6 @@ struct SettingsView: View {
     /// 外观设置（原「我的」页外观折叠内容）
     private var appearanceSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SectionHeader(title: "外观")
             // 外观设置行：点击展开 / 收起全部外观设置
             Button {
                 BeansHaptics.select()
@@ -1139,10 +1667,18 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 14) {
                 Picker("主题模式", selection: $themeModeRaw) {
                     ForEach(BeansThemeMode.allCases) { mode in
-                        Text(mode.title).tag(mode.rawValue)
+                        Text(LocalizedStringKey(mode.title)).tag(mode.rawValue)
                     }
                 }
                 .pickerStyle(.segmented)
+
+                Picker("语言", selection: $languageRaw) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.title).tag(language.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(Color.beansAmber)
 
                 Toggle(isOn: $tabLabelsVisible) {
                     HStack(spacing: 12) {
@@ -1154,9 +1690,22 @@ struct SettingsView: View {
                             Text("底栏显示文字")
                                 .font(BeansFont.appFont(15))
                                 .foregroundStyle(Color.beansLabel)
-                            Text("关闭后底栏只保留图标，界面更简洁")
-                                .font(BeansFont.appFont(11))
-                                .foregroundStyle(Color.beansComment)
+                        }
+                    }
+                }
+                .toggleStyle(.switch)
+                .tint(Color.beansAmber)
+
+                Toggle(isOn: $showSongVIPBadge) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "crown.fill")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color.beansAmber)
+                            .frame(width: 28)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("显示歌曲 VIP 图标")
+                                .font(BeansFont.appFont(15))
+                                .foregroundStyle(Color.beansLabel)
                         }
                     }
                 }
@@ -1165,9 +1714,13 @@ struct SettingsView: View {
 
                 Divider().overlay(Color.beansComment.opacity(0.15))
 
-                legacyTabBarSettings
-
                 Divider().overlay(Color.beansComment.opacity(0.15))
+
+                if #unavailable(iOS 26) {
+                    legacyTabBarSettings
+
+                    Divider().overlay(Color.beansComment.opacity(0.15))
+                }
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -1185,7 +1738,7 @@ struct SettingsView: View {
                         set: { theme.setUIStyle($0) }
                     )) {
                         ForEach(BeansUIStyle.allCases, id: \.self) { style in
-                            Text(style.title).tag(style)
+                            Text(LocalizedStringKey(style.title)).tag(style)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -1218,11 +1771,11 @@ struct SettingsView: View {
                             .foregroundStyle(Color.beansAmber)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(.ultraThinMaterial, in: Capsule())
+                            .background { BeansSurface(shape: Capsule()) }
                     }
                     .buttonStyle(.plain)
                     Spacer()
-                    Text(theme.customAccentHex == nil ? "使用预设主题" : "已自定义")
+                            Text(LocalizedStringKey(theme.customAccentHex == nil ? "使用预设主题" : "已自定义"))
                         .font(BeansFont.appFont(12))
                         .foregroundStyle(Color.beansComment)
                 }
@@ -1234,13 +1787,30 @@ struct SettingsView: View {
                             .font(.system(size: 14))
                             .foregroundStyle(Color.beansAmber)
                             .frame(width: 28)
-                        Text("主页背景色")
+                        Text(beansLocalized("主页背景色", "Home Background Color"))
+                            .font(BeansFont.appFont(15))
+                            .foregroundStyle(Color.beansLabel)
+                        Spacer()
+                    }
+                    Picker(beansLocalized("背景模式", "Background Mode"), selection: $wallpaperAppearanceTarget) {
+                        ForEach(BeansWallpaperAppearance.allCases) { appearance in
+                            Text(appearance.title).tag(appearance)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .tint(Color.beansAmber)
+                    HStack {
+                        Image(systemName: "circle.lefthalf.filled")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color.beansAmber)
+                            .frame(width: 28)
+                        Text(beansLocalized("背景颜色", "Background Color"))
                             .font(BeansFont.appFont(15))
                             .foregroundStyle(Color.beansLabel)
                         Spacer()
                         ColorPicker("", selection: Binding(
-                            get: { theme.customBackground ?? Color.beansBackground },
-                            set: { theme.setBackground($0.hexString) }
+                            get: { theme.customBackground(for: wallpaperAppearanceTarget.colorScheme) ?? Color.beansBackground },
+                            set: { theme.setBackground($0.hexString, for: wallpaperAppearanceTarget.colorScheme) }
                         ))
                         .labelsHidden()
                     }
@@ -1269,7 +1839,7 @@ struct SettingsView: View {
                     if !theme.wallpaperPaths.isEmpty {
                         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
                             ForEach(theme.wallpaperPaths, id: \.self) { path in
-                                wallpaperCell(path: path)
+                                wallpaperCell(path: path, appearance: wallpaperAppearanceTarget)
                             }
                         }
                     } else {
@@ -1284,9 +1854,9 @@ struct SettingsView: View {
                         }
                     }
                     HStack(spacing: 12) {
-                        if theme.customBackgroundImage != nil {
+                        if theme.customBackgroundImage(for: wallpaperAppearanceTarget.colorScheme) != nil {
                             Button {
-                                theme.clearBackgroundImage()
+                                theme.clearBackgroundImage(for: wallpaperAppearanceTarget.colorScheme)
                                 BeansHaptics.select()
                             } label: {
                                 Text("清除当前背景")
@@ -1294,12 +1864,12 @@ struct SettingsView: View {
                                     .foregroundStyle(.red)
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 6)
-                                    .background(.ultraThinMaterial, in: Capsule())
+                                    .background { BeansSurface(shape: Capsule()) }
                             }
                             .buttonStyle(.plain)
                         }
                         Spacer()
-                        Text(theme.customBackgroundImage == nil ? "当前：默认背景" : "当前：已应用壁纸")
+                            Text(LocalizedStringKey(theme.customBackgroundImage(for: wallpaperAppearanceTarget.colorScheme) == nil ? "当前：默认背景" : "当前：已应用壁纸"))
                             .font(BeansFont.appFont(12))
                             .foregroundStyle(Color.beansComment)
                     }
@@ -1311,7 +1881,7 @@ struct SettingsView: View {
                         Image(systemName: "square.grid.2x2.fill")
                             .font(.system(size: 12))
                             .foregroundStyle(Color.beansAmber)
-                        Text("同步到搜索 / 音乐库 / 我的")
+                        Text(LocalizedStringKey("同步到搜索 / 音乐库 / 我的"))
                             .font(BeansFont.appFont(13))
                             .foregroundStyle(Color.beansLabel)
                     }
@@ -1331,7 +1901,7 @@ struct SettingsView: View {
                             .foregroundStyle(Color.beansAmber)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(.ultraThinMaterial, in: Capsule())
+                        .background { BeansSurface(shape: Capsule()) }
                     }
                     .buttonStyle(.plain)
                     Spacer()
@@ -1368,11 +1938,11 @@ struct SettingsView: View {
                             .foregroundStyle(Color.beansAmber)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(.ultraThinMaterial, in: Capsule())
+                        .background { BeansSurface(shape: Capsule()) }
                     }
                     .buttonStyle(.plain)
                     Spacer()
-                    Text("全 App 说明文字颜色")
+                    Text(LocalizedStringKey("全 App 说明文字颜色"))
                         .font(BeansFont.appFont(12))
                         .foregroundStyle(Color.beansComment)
                 }
@@ -1411,16 +1981,225 @@ struct SettingsView: View {
                             .foregroundStyle(Color.beansAmber)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(.ultraThinMaterial, in: Capsule())
+                        .background { BeansSurface(shape: Capsule()) }
                     }
                     .buttonStyle(.plain)
                     Spacer()
-                    Text("全 App 主文字颜色")
+                    Text(LocalizedStringKey("全 App 主文字颜色"))
                         .font(BeansFont.appFont(12))
                         .foregroundStyle(Color.beansComment)
                 }
 
                 Divider().overlay(Color.beansComment.opacity(0.15))
+
+                // Greeting customization was removed; retain only wallpaper controls below.
+                if false {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Image(systemName: "text.badge.star")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color.beansAmber)
+                            .frame(width: 28)
+                        Text("主页问候文字")
+                            .font(BeansFont.appFont(15))
+                            .foregroundStyle(Color.beansLabel)
+                        Spacer()
+                        ColorPicker("", selection: Binding(
+                            get: { Color(hex: homeGreetingColorHex) ?? Color.beansLabel },
+                            set: { homeGreetingColorHex = $0.hexString }
+                        ), supportsOpacity: false)
+                        .labelsHidden()
+                    }
+
+                    HStack {
+                        Image(systemName: "drop.fill")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color.beansAmber)
+                            .frame(width: 28)
+                        Text("主页壁纸模糊度")
+                            .font(BeansFont.appFont(15))
+                            .foregroundStyle(Color.beansLabel)
+                        Spacer()
+                        Text("\(Int(homeWallpaperBlur))")
+                            .font(BeansFont.appFont(12))
+                            .foregroundStyle(Color.beansComment)
+                    }
+                    Slider(value: $homeWallpaperBlur, in: 0...30, step: 1)
+                        .tint(Color.beansAmber)
+                    TextEditor(text: $homeGreetingText)
+                        .font(BeansFont.appFont(15))
+                        .frame(minHeight: 88, maxHeight: 180)
+                        .padding(6)
+                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay {
+                            if homeGreetingText.isEmpty {
+                                Text(LocalizedStringKey("留空自动显示早上好/下午好/晚上好"))
+                                    .font(BeansFont.appFont(13))
+                                    .foregroundStyle(Color.beansComment.opacity(0.8))
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 14)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                    VStack(spacing: 8) {
+                        HStack {
+                            Text("文字大小")
+                            Spacer()
+                            Text("\(Int(homeGreetingSize))")
+                                .foregroundStyle(Color.beansComment)
+                        }
+                        Slider(value: $homeGreetingSize, in: 20...64, step: 1)
+                        HStack {
+                            Text("标题区高度")
+                            Spacer()
+                            Text(homeGreetingHeight <= 0 ? "自动" : "\(Int(homeGreetingHeight))")
+                                .foregroundStyle(Color.beansComment)
+                        }
+                        Slider(value: $homeGreetingHeight, in: 0...260, step: 1)
+                    }
+                    .font(BeansFont.appFont(12))
+                    .foregroundStyle(Color.beansLabel)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("开启文字背景发光", isOn: $homeGreetingGlowEnabled)
+                        HStack {
+                            Text("发光强度")
+                            Spacer()
+                            Text("\(Int(homeGreetingGlowIntensity * 100))%")
+                                .foregroundStyle(Color.beansComment)
+                        }
+                        Slider(value: $homeGreetingGlowIntensity, in: 0...2, step: 0.01)
+                            .tint(Color.beansAmber)
+                            .disabled(!homeGreetingGlowEnabled)
+                    }
+                    .font(BeansFont.appFont(12))
+                    .foregroundStyle(Color.beansLabel)
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Image(systemName: "textformat")
+                                .foregroundStyle(Color.beansAmber)
+                            Text("问候语专属字体")
+                            Spacer()
+                            Text(LocalizedStringKey(homeGreetingFontName.isEmpty ? "跟随全局" : "已设置"))
+                                .foregroundStyle(Color.beansComment)
+                        }
+                        HStack(spacing: 10) {
+                            Button {
+                                showGreetingFontImporter = true
+                            } label: {
+                                Label("选择字体", systemImage: "text.badge.plus")
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(Color.beansAmber)
+                            if !homeGreetingFontName.isEmpty {
+                                Button("清除专属字体") {
+                                    FontManager.clearGreeting()
+                                    homeGreetingFontName = ""
+                                    BeansHaptics.select()
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(Color.beansComment)
+                            }
+                        }
+                        Text("仅主页问候语使用该字体；清除后跟随全局字体，没有全局字体时使用系统字体。")
+                            .font(BeansFont.appFont(11))
+                            .foregroundStyle(Color.beansComment)
+                    }
+                    .font(BeansFont.appFont(12))
+                    .foregroundStyle(Color.beansLabel)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("显示底部横线", isOn: $homeGreetingUnderline)
+                        Toggle("开启上下渐变字", isOn: $homeGreetingGradient)
+                        if homeGreetingGradient {
+                            ColorPicker("渐变起始颜色", selection: Binding(
+                                get: { Color(hex: homeGreetingGradientStartHex) ?? (Color(hex: homeGreetingColorHex) ?? Color.beansLabel) },
+                                set: { homeGreetingGradientStartHex = $0.hexString }
+                            ), supportsOpacity: false)
+                            ColorPicker("渐变结束颜色", selection: Binding(
+                                get: { Color(hex: homeGreetingGradientEndHex) ?? (Color(hex: homeGreetingColorHex) ?? Color.beansLabel) },
+                                set: { homeGreetingGradientEndHex = $0.hexString }
+                            ), supportsOpacity: false)
+                        }
+                    }
+                    .font(BeansFont.appFont(12))
+                    .foregroundStyle(Color.beansLabel)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("逐行调节")
+                            .font(BeansFont.appFont(13, .semibold))
+                            .foregroundStyle(Color.beansLabel)
+                        ForEach(Array(homeGreetingLines.prefix(3).enumerated()), id: \.offset) { index, line in
+                            VStack(alignment: .leading, spacing: 7) {
+                                HStack {
+                                    Text(String(format: NSLocalizedString("第%d行", comment: ""), index + 1))
+                                        .font(BeansFont.appFont(12, .semibold))
+                                    Text(line.isEmpty ? "空行" : line)
+                                        .font(BeansFont.appFont(11))
+                                        .foregroundStyle(Color.beansComment)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Button("跟随全局") {
+                                        resetGreetingLineStyle(index)
+                                    }
+                                    .font(BeansFont.appFont(11, .medium))
+                                    .foregroundStyle(Color.beansAmber)
+                                    .buttonStyle(.plain)
+                                }
+                                HStack {
+                                    Text("字号")
+                                    Spacer()
+                                    Text("\(Int(greetingLineSizeBinding(index).wrappedValue))")
+                                        .foregroundStyle(Color.beansComment)
+                                }
+                                Slider(value: greetingLineSizeBinding(index), in: 12...80, step: 1)
+                                    .tint(Color.beansAmber)
+                                HStack(spacing: 12) {
+                                    ColorPicker("颜色", selection: greetingLineColorBinding(index), supportsOpacity: false)
+                                    Spacer()
+                                    Text("上下偏移 \(Int(greetingLineOffsetBinding(index).wrappedValue))")
+                                        .foregroundStyle(Color.beansComment)
+                                }
+                                Slider(value: greetingLineOffsetBinding(index), in: -80...80, step: 1)
+                                    .tint(Color.beansAmber)
+                                if homeGreetingGradient {
+                                    HStack(spacing: 12) {
+                                        ColorPicker("渐变起始", selection: greetingLineGradientStartBinding(index), supportsOpacity: false)
+                                        Spacer()
+                                        ColorPicker("渐变结束", selection: greetingLineGradientEndBinding(index), supportsOpacity: false)
+                                    }
+                                }
+                            }
+                            .padding(10)
+                            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                    }
+                    .font(BeansFont.appFont(12))
+                    .foregroundStyle(Color.beansLabel)
+                }
+
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("主页壁纸模糊度")
+                        Spacer()
+                        Text("\(Int(homeWallpaperBlur))")
+                            .foregroundStyle(Color.beansComment)
+                    }
+                    .font(BeansFont.appFont(12))
+                    Slider(value: $homeWallpaperBlur, in: 0...30, step: 1)
+                        .tint(Color.beansAmber)
+                }
+
+                Divider().overlay(Color.beansComment.opacity(0.15))
+
+                Toggle("隐藏主页用户名", isOn: $homeHideUsername)
+                    .font(BeansFont.appFont(13))
+                Toggle("隐藏所有界面排序按钮", isOn: $homeHeaderHideSort)
+                    .font(BeansFont.appFont(13))
+                Toggle("隐藏顶部平台列表", isOn: $hidePlatformPicker)
+                    .font(BeansFont.appFont(13))
+                Toggle("隐藏主页刷新按钮", isOn: $homeHeaderHideRefresh)
+                    .font(BeansFont.appFont(13))
 
                 HStack {
                     Image(systemName: "textformat")
@@ -1444,7 +2223,7 @@ struct SettingsView: View {
                             .foregroundStyle(Color.beansAmber)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(.ultraThinMaterial, in: Capsule())
+                    .background { BeansSurface(shape: Capsule()) }
                     }
                     .buttonStyle(.plain)
                     Button {
@@ -1457,15 +2236,11 @@ struct SettingsView: View {
                             .foregroundStyle(Color.beansAmber)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(.ultraThinMaterial, in: Capsule())
+                    .background { BeansSurface(shape: Capsule()) }
                     }
                     .buttonStyle(.plain)
                     Spacer()
                 }
-                Text("支持 ttf / otf 字体，上传后全局生效（含歌词），重启保留")
-                    .font(BeansFont.appFont(12))
-                    .foregroundStyle(Color.beansComment)
-
             }
             .padding(16)
             .background {
@@ -1476,7 +2251,43 @@ struct SettingsView: View {
         }
     }
 
-    /// 播放与歌词设置（借鉴 Kumone：音质 / 免费听歌 / 显示歌词翻译）
+    /// 播放与歌词设置。
+    private var equalizerSection: some View {
+        Button {
+            BeansHaptics.select()
+            showEqualizer = true
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.beansAmber)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(beansLocalized("均衡器", "Equalizer"))
+                        .font(BeansFont.appFont(15))
+                        .foregroundStyle(Color.beansLabel)
+                    Text(beansLocalized("调节低音、人声与高音", "Adjust bass, vocals, and treble"))
+                        .font(BeansFont.appFont(11))
+                        .foregroundStyle(Color.beansComment)
+                }
+                Spacer()
+                Text(equalizer.isEnabled ? beansLocalized("已开启", "On") : beansLocalized("已关闭", "Off"))
+                    .font(BeansFont.appFont(12, .medium))
+                    .foregroundStyle(equalizer.isEnabled ? Color.beansAmber : Color.beansComment)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.beansComment.opacity(0.6))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 13)
+            .background {
+                BeansGlass(shape: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(GlassPressButtonStyle(scale: 0.98))
+    }
+
     private var playbackSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Button {
@@ -1494,10 +2305,6 @@ struct SettingsView: View {
                         Text("播放设置")
                             .font(BeansFont.appFont(15))
                             .foregroundStyle(Color.beansLabel)
-                        Text("\(BeansAudioQuality(rawValue: audioQualityRaw)?.displayName ?? "高品质") · \(enableBuiltInSources ? "内置音源已开" : "内置音源已关")")
-                            .font(BeansFont.appFont(11))
-                            .foregroundStyle(Color.beansComment)
-                            .lineLimit(1)
                     }
                     Spacer()
                     Image(systemName: playbackExpanded ? "chevron.up" : "chevron.down")
@@ -1515,29 +2322,6 @@ struct SettingsView: View {
 
             if playbackExpanded {
             VStack(spacing: 14) {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "waveform.circle.fill")
-                            .font(.system(size: 14))
-                            .foregroundStyle(Color.beansAmber)
-                            .frame(width: 28)
-                        Text("音质")
-                            .font(BeansFont.appFont(15))
-                            .foregroundStyle(Color.beansLabel)
-                    }
-                    Picker("音质", selection: $audioQualityRaw) {
-                        ForEach(BeansAudioQuality.allCases) { q in
-                            Text(q.displayName).tag(q.rawValue)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    Text("无损与 Hi-Res 需要黑胶 VIP，未开通时自动回落到可用音质")
-                        .font(BeansFont.appFont(11))
-                        .foregroundStyle(Color.beansComment)
-                }
-
-                Divider().overlay(Color.beansComment.opacity(0.15))
-
                 Toggle(isOn: $mixesWithOthers) {
                     HStack(spacing: 12) {
                         Image(systemName: "speaker.wave.2.fill")
@@ -1548,9 +2332,6 @@ struct SettingsView: View {
                             Text("与其他音频同时播放")
                                 .font(BeansFont.appFont(15))
                                 .foregroundStyle(Color.beansLabel)
-                            Text("默认关闭以显示锁屏/灵动岛；开启后可与其他 App 声音同时播放")
-                                .font(BeansFont.appFont(11))
-                                .foregroundStyle(Color.beansComment)
                         }
                     }
                 }
@@ -1562,17 +2343,39 @@ struct SettingsView: View {
 
                 Divider().overlay(Color.beansComment.opacity(0.15))
 
-                Toggle(isOn: $enableHighRefresh) {
+                HStack(spacing: 12) {
+                    Image(systemName: "speedometer")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color.beansAmber)
+                        .frame(width: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("120Hz 高刷新")
+                            .font(BeansFont.appFont(15))
+                            .foregroundStyle(Color.beansLabel)
+                    }
+                    Spacer()
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 17))
+                        .foregroundStyle(Color.beansAmber)
+                }
+                .onAppear {
+                    enableHighRefresh = true
+                    HighRefreshKeeper.shared.configure(enabled: true)
+                }
+
+                Divider().overlay(Color.beansComment.opacity(0.15))
+
+                Toggle(isOn: $autoResumeLastPlayback) {
                     HStack(spacing: 12) {
-                        Image(systemName: "speedometer")
+                        Image(systemName: "play.square.stack.fill")
                             .font(.system(size: 14))
                             .foregroundStyle(Color.beansAmber)
                             .frame(width: 28)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("高刷新动效")
+                            Text(beansLocalized("启动时自动播放上次歌曲", "Auto-play the last song on launch"))
                                 .font(BeansFont.appFont(15))
                                 .foregroundStyle(Color.beansLabel)
-                            Text("默认开启；允许系统高刷动画，不再常驻空转刷新")
+                            Text(beansLocalized("打开软件后自动恢复上次未播放完的歌曲", "Automatically resume the last unfinished song when the app starts."))
                                 .font(BeansFont.appFont(11))
                                 .foregroundStyle(Color.beansComment)
                         }
@@ -1583,24 +2386,25 @@ struct SettingsView: View {
 
                 Divider().overlay(Color.beansComment.opacity(0.15))
 
-                Toggle(isOn: $enableBuiltInSources) {
+                playbackQualitySection
+
+                Divider().overlay(Color.beansComment.opacity(0.15))
+
+                Toggle(isOn: $hapticsEnabled) {
                     HStack(spacing: 12) {
-                        Image(systemName: "externaldrive.connected.to.line.below")
+                        Image(systemName: "iphone.radiowaves.left.and.right")
                             .font(.system(size: 14))
-                        .foregroundStyle(Color.beansAmber)
-                        .frame(width: 28)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("使用内置音源")
-                                .font(BeansFont.appFont(15))
-                                .foregroundStyle(Color.beansLabel)
-                            Text("仅在官方地址不可用或为试听片段时回退到预设")
-                                .font(BeansFont.appFont(11))
-                                .foregroundStyle(Color.beansComment)
-                        }
+                            .foregroundStyle(Color.beansAmber)
+                            .frame(width: 28)
+                        Text(beansLocalized("触感反馈", "Haptic Feedback"))
+                            .font(BeansFont.appFont(15))
+                            .foregroundStyle(Color.beansLabel)
                     }
                 }
                 .toggleStyle(.switch)
                 .tint(Color.beansAmber)
+
+                Divider().overlay(Color.beansComment.opacity(0.15))
 
                 Toggle(isOn: $showThirdPartyVIPNotice) {
                     HStack(spacing: 12) {
@@ -1609,12 +2413,9 @@ struct SettingsView: View {
                             .foregroundStyle(Color.beansAmber)
                             .frame(width: 28)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("第三方播放会员歌提醒")
+                            Text(beansLocalized("第三方播放会员歌提醒", "VIP song notice for third-party playback"))
                                 .font(BeansFont.appFont(15))
                                 .foregroundStyle(Color.beansLabel)
-                            Text("未识别到对应会员且会员歌曲通过内置音源播放成功时提示")
-                                .font(BeansFont.appFont(11))
-                                .foregroundStyle(Color.beansComment)
                         }
                     }
                 }
@@ -1625,31 +2426,81 @@ struct SettingsView: View {
                     Image(systemName: "shippingbox.fill")
                         .font(.system(size: 14))
                         .foregroundStyle(Color.beansAmber)
-                    Text("内置音源预设")
+                    Text(beansLocalized("第三方音源", "Third-party Sources"))
                         .font(BeansFont.appFont(13, .semibold))
                         .foregroundStyle(Color.beansLabel)
                     Spacer()
-                    Text("\(presetSourceCount) 个")
+                    Text(beansLocalized("\(customSourceCount) 个", "\(customSourceCount) sources"))
                         .font(BeansFont.appFont(12))
                         .foregroundStyle(Color.beansComment)
                 }
 
-                ForEach(sourceStore.presetSources) { source in
-                    HStack(spacing: 10) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(source.name)
-                                .font(BeansFont.appFont(13, .medium))
-                                .foregroundStyle(Color.beansLabel)
-                                .lineLimit(1)
-                            Text("内置预设 · \(source.kind.replacingOccurrences(of: "paid-", with: "").uppercased())")
-                                .font(BeansFont.appFont(10))
-                                .foregroundStyle(Color.beansComment)
-                        }
-                        Spacer()
-                        Toggle("", isOn: sourceEnabledBinding(source.id))
-                            .labelsHidden()
-                            .tint(Color.beansAmber)
+                Button {
+                    showSourceManager = true
+                    BeansHaptics.tap()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "square.and.pencil")
+                        Text(beansLocalized("管理 / 导入音源", "Manage / Import Sources"))
                     }
+                    .font(BeansFont.appFont(13, .semibold))
+                    .foregroundStyle(Color.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color.black, in: Capsule())
+                }
+                .buttonStyle(GlassPressButtonStyle(scale: 0.97))
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "speaker.wave.2.fill")
+                            .font(.system(size: 14))
+                            .foregroundStyle(Color.beansAmber)
+                            .frame(width: 28)
+                        Text(thirdPartyAudioQualityTitle)
+                            .font(BeansFont.appFont(13, .semibold))
+                            .foregroundStyle(Color.beansLabel)
+                        Spacer()
+                        Text(thirdPartyAudioQualitySelection.wrappedValue.displayName)
+                            .font(BeansFont.appFont(12))
+                            .foregroundStyle(Color.beansComment)
+                    }
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(thirdPartyAudioQualityOptions) { quality in
+                                let selected = thirdPartyAudioQualitySelection.wrappedValue == quality
+                                Button {
+                                    thirdPartyAudioQualitySelection.wrappedValue = quality
+                                    BeansHaptics.select()
+                                } label: {
+                                    HStack(spacing: 5) {
+                                        Text(quality.displayName)
+                                        if selected {
+                                            Image(systemName: "checkmark")
+                                                .font(.system(size: 9, weight: .bold))
+                                        }
+                                    }
+                                    .font(BeansFont.appFont(12, selected ? .semibold : .medium))
+                                    .foregroundStyle(selected ? Color.beansAmber : Color.beansLabel)
+                                    .padding(.horizontal, 12)
+                                    .frame(height: 31)
+                                    .background {
+                                        Capsule()
+                                            .fill(selected ? Color.beansAmber.opacity(0.14) : Color.beansLabel.opacity(0.055))
+                                    }
+                                    .overlay {
+                                        Capsule()
+                                            .strokeBorder(selected ? Color.beansAmber.opacity(0.42) : Color.beansLabel.opacity(0.08), lineWidth: 0.8)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 1)
+                    }
+                    Text(thirdPartyAudioQualityHint)
+                        .font(BeansFont.appFont(11))
+                        .foregroundStyle(Color.beansComment)
                 }
 
             }
@@ -1659,18 +2510,11 @@ struct SettingsView: View {
             }
             .beansCardShadow(radius: 9, y: 3)
             .transition(.opacity.combined(with: .move(edge: .top)))
+            .task(id: thirdPartyAudioQualityOptionsSignature) {
+                normalizeThirdPartyAudioQualitySelection()
+            }
             }
         }
-    }
-
-    private func sourceEnabledBinding(_ id: String) -> Binding<Bool> {
-        Binding(
-            get: { sourceStore.presetSources.first(where: { $0.id == id })?.enabled ?? false },
-            set: { value in
-                guard let index = sourceStore.presetSources.firstIndex(where: { $0.id == id }) else { return }
-                sourceStore.presetSources[index].enabled = value
-            }
-        )
     }
 
     /// 更新日志入口
@@ -1705,44 +2549,34 @@ struct SettingsView: View {
             .beansCardShadow(radius: 8, y: 3)
         }
     }
-
-    /// 软件使用说明入口（放在设置页底部）
-    private var settingsUsageGuideSection: some View {
-        Button {
-            BeansHaptics.tap()
-            showUsageGuide = true
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "questionmark.circle.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(Color.beansAmber)
-                    .frame(width: 28)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("软件使用说明")
-                        .font(BeansFont.appFont(15))
-                        .foregroundStyle(Color.beansLabel)
-                    Text("多平台切换、账号、播放与个性化说明")
-                        .font(BeansFont.appFont(11))
-                        .foregroundStyle(Color.beansComment)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.beansComment.opacity(0.6))
-            }
-            .padding(16)
-            .background {
-                BeansGlass(shape: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            }
-        }
-        .buttonStyle(.plain)
-        .beansCardShadow(radius: 8, y: 3)
-    }
-
-    /// 配置备份与恢复：导出全部 beans.* 设置为 JSON 分享；导入后写回 UserDefaults
     private var backupSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SectionHeader(title: "备份与恢复")
+            Button {
+                BeansHaptics.select()
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    backupExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "externaldrive.fill")
+                        .foregroundStyle(Color.beansAmber)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("备份与恢复")
+                            .font(BeansFont.appFont(15))
+                            .foregroundStyle(Color.beansLabel)
+                    }
+                    Spacer()
+                    Image(systemName: backupExpanded ? "chevron.up" : "chevron.down")
+                        .foregroundStyle(Color.beansComment)
+                }
+                .padding(14)
+                .background {
+                    BeansGlass(shape: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
+            }
+            .buttonStyle(.plain)
+
+            if backupExpanded {
             VStack(spacing: 10) {
                 Toggle("备份登录信息", isOn: $backupIncludeAccounts)
                     .tint(Color.beansAmber)
@@ -1751,6 +2585,7 @@ struct SettingsView: View {
                 Toggle("备份壁纸图片", isOn: $backupIncludeWallpapers)
                     .tint(Color.beansAmber)
                     .font(BeansFont.appFont(13))
+                Divider().opacity(0.35)
                 Text("默认不带账号登录信息；关闭壁纸后只备份普通设置，不写入壁纸图片数据")
                     .font(BeansFont.appFont(11))
                     .foregroundStyle(Color.beansComment)
@@ -1770,15 +2605,12 @@ struct SettingsView: View {
                     showRestorePicker = true
                 }
             }
-            backupActionButton(icon: "arrow.counterclockwise.circle", title: "重置所有设置（保留登录）") {
-                BeansHaptics.tap()
-                showResetSettingsConfirm = true
-            }
             if let backupMessage {
                 Text(backupMessage)
                     .font(BeansFont.appFont(11))
                     .foregroundStyle(Color.beansComment)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
             }
         }
     }
@@ -1787,7 +2619,7 @@ struct SettingsView: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
-                Text(title)
+                Text(LocalizedStringKey(title))
             }
             .font(BeansFont.appFont(14, .semibold))
             .foregroundStyle(Color.beansLabel)
@@ -1811,12 +2643,18 @@ struct SettingsView: View {
         key.hasPrefix("beans.search.")
             || key.hasPrefix("beans.log")
             || key.hasPrefix("beans.crash")
+            || key == "beans.thirdPartyAPIKeys"
             || key == "beans.launchInProgress"
             || key == "beans.wallpapers.deleted"
     }
 
     private static func isWallpaperBackupKey(_ key: String) -> Bool {
         key == "beans.background.image"
+            || key == "beans.background.image.light"
+            || key == "beans.background.image.dark"
+            || key == "beans.background.custom"
+            || key == "beans.background.custom.light"
+            || key == "beans.background.custom.dark"
             || key == "beans.wallpapers.list"
             || key == "beans.wallpapers.data"
             || key == "beans.lyricBackground.image"
@@ -1921,6 +2759,20 @@ struct SettingsView: View {
             defaults.set(restored, forKey: key)
             count += 1
         }
+        // 兼容旧备份：旧版本只有一套背景，恢复后让浅色和深色都继承它。
+        if json["beans.background.custom.light"] == nil,
+           json["beans.background.custom.dark"] == nil,
+           let legacy = json["beans.background.custom"] as? String {
+            defaults.set(legacy, forKey: "beans.background.custom.light")
+            defaults.set(legacy, forKey: "beans.background.custom.dark")
+        }
+        if json["beans.background.image.light"] == nil,
+           json["beans.background.image.dark"] == nil,
+           let legacy = json["beans.background.image"] as? String {
+            defaults.set(legacy, forKey: "beans.background.image.light")
+            defaults.set(legacy, forKey: "beans.background.image.dark")
+        }
+        theme.reloadBackgroundSettings()
         defaults.removeObject(forKey: "beans.wallpapers.deleted")
         // 恢复壁纸：写回 beans.wallpapers.* 后重建文件（沙盒路径变化也能恢复）
         theme.reloadWallpapersFromBackup()
@@ -2008,7 +2860,7 @@ struct SettingsView: View {
     private func settingsSlider<Content: View>(_ title: String, valueText: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(spacing: 5) {
             HStack {
-                Text(title)
+                Text(LocalizedStringKey(title))
                     .font(BeansFont.appFont(13))
                     .foregroundStyle(Color.beansLabel)
                 Spacer()
@@ -2017,32 +2869,8 @@ struct SettingsView: View {
                     .foregroundStyle(Color.beansAmber)
             }
             content()
+                .transaction { transaction in transaction.animation = nil }
         }
-    }
-
-    private func resetAllSettingsKeepingAccounts() {
-        let defaults = UserDefaults.standard
-        var removed = 0
-        for key in defaults.dictionaryRepresentation().keys {
-            guard Self.isBackupCandidateKey(key) else { continue }
-            guard !Self.isAccountBackupKey(key) else { continue }
-            guard !Self.isSystemBackupKey(key) else { continue }
-            guard key != "beans.disclaimerAccepted" else { continue }
-            defaults.removeObject(forKey: key)
-            removed += 1
-        }
-        theme.set(.amber)
-        theme.clearCustomAccent()
-        theme.setBackground("")
-        theme.setBackgroundSyncAll(true)
-        theme.clearAllWallpapers()
-        theme.setUIStyle(.liquid)
-        LyricBackgroundStore.clear()
-        PlatformPreferenceStore.shared.resetToDefault()
-        BeansHaptics.success()
-        backupMessage = "已重置 \(removed) 项设置，登录信息已保留"
-        ToastCenter.shared.show("设置已重置")
-        BeansLogger.shared.log("重置所有设置：移除 \(removed) 项，保留登录信息", level: .info)
     }
 
     /// 任意 UserDefaults 值 → JSON 可序列化（Data 转 base64、Date 转时间戳）
@@ -2095,10 +2923,6 @@ struct SettingsView: View {
                         ToastCenter.shared.show("日志已清空")
                     }
                 }
-                Text("日志记录搜索、播放、登录、备份等关键事件；遇到问题可在查看日志里导出，方便快速定位 Bug")
-                    .font(BeansFont.appFont(11))
-                    .foregroundStyle(Color.beansComment)
-                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(14)
             .background {
@@ -2111,7 +2935,7 @@ struct SettingsView: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
-                Text(title)
+                Text(LocalizedStringKey(title))
             }
             .font(BeansFont.appFont(13, .semibold))
             .foregroundStyle(Color.beansLabel)
@@ -2137,13 +2961,13 @@ struct SettingsView: View {
         .padding(.top, 4)
     }
 
-    /// 壁纸格子：点击应用为当前背景；使用中的壁纸显示主题色边框+勾选；右上角删除
-    private func wallpaperCell(path: String) -> some View {
-        let isActive = path == theme.backgroundImagePath
+    /// 壁纸格子：点击应用到所选外观；使用中的壁纸显示主题色边框+勾选；右上角删除
+    private func wallpaperCell(path: String, appearance: BeansWallpaperAppearance) -> some View {
+        let isActive = path == theme.backgroundImagePath(for: appearance.colorScheme)
         return ZStack(alignment: .topTrailing) {
             Button {
                 BeansHaptics.tap()
-                theme.applyWallpaper(at: path)
+                theme.applyWallpaper(at: path, for: appearance.colorScheme)
             } label: {
                 Group {
                     if let img = BeansImageFileCache.image(at: path) {
@@ -2162,7 +2986,7 @@ struct SettingsView: View {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 18))
                             .foregroundStyle(Color.beansAmber)
-                            .background(Circle().fill(.ultraThinMaterial))
+                            .background { BeansSurface(shape: Circle()) }
                             .padding(5)
                     }
                 }
@@ -2177,7 +3001,7 @@ struct SettingsView: View {
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Color.beansComment)
                     .frame(width: 28, height: 28)
-                    .background(Circle().fill(.ultraThinMaterial))
+                    .background { BeansSurface(shape: Circle()) }
                     .clipShape(Circle())
                     .contentShape(Circle())
                     .padding(6)
@@ -2185,6 +3009,434 @@ struct SettingsView: View {
             .buttonStyle(.plain)
             .zIndex(2)
         }
+    }
+}
+
+// MARK: - 均衡器
+
+struct EqualizerSettingsView: View {
+    @EnvironmentObject private var theme: ThemeStore
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var equalizer = BeansEqualizer.shared
+    @State private var newPresetName = ""
+    @State private var showPresetNamePrompt = false
+
+    private var enabledBinding: Binding<Bool> {
+        Binding(
+            get: { equalizer.isEnabled },
+            set: { equalizer.setEnabled($0) }
+        )
+    }
+
+    private func gainBinding(_ index: Int) -> Binding<Double> {
+        Binding(
+            get: { equalizer.bandGains.indices.contains(index) ? equalizer.bandGains[index] : 0 },
+            set: { equalizer.setBandGain(at: index, to: $0) }
+        )
+    }
+
+    private var preampBinding: Binding<Double> {
+        Binding(
+            get: { equalizer.preampGain },
+            set: { equalizer.setPreampGain($0) }
+        )
+    }
+
+    var body: some View {
+        BeansNavigationStack {
+            ZStack {
+                GlassBackdrop(customColor: theme.backgroundSyncAll ? theme.customBackground : nil)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        EqualizerResponseView(
+                            gains: equalizer.bandGains,
+                            preampGain: equalizer.preampGain
+                        )
+                        controlCard
+                        presetCard
+                        bandsCard
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .padding(.bottom, 32)
+                    .frame(maxWidth: 680)
+                    .frame(maxWidth: .infinity)
+                }
+                .beansScrollIndicatorsHidden()
+            }
+            .navigationTitle(beansLocalized("均衡器", "Equalizer"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(beansLocalized("完成", "Done")) { dismiss() }
+                }
+            }
+            .alert(
+                beansLocalized("保存自定义预设", "Save custom preset"),
+                isPresented: $showPresetNamePrompt
+            ) {
+                TextField(
+                    beansLocalized("预设名称", "Preset name"),
+                    text: $newPresetName
+                )
+                Button(beansLocalized("保存", "Save")) {
+                    if equalizer.saveCustomPreset(name: newPresetName) {
+                        BeansHaptics.select()
+                    }
+                    newPresetName = ""
+                }
+                Button(beansLocalized("取消", "Cancel"), role: .cancel) {
+                    newPresetName = ""
+                }
+            } message: {
+                Text(beansLocalized("保存当前频段和前级增益，之后可以一键恢复。", "Save the current bands and preamp for one-tap recall later."))
+            }
+        }
+    }
+
+    private var controlCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle(isOn: enabledBinding) {
+                HStack(spacing: 11) {
+                    Image(systemName: "waveform.path.ecg")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Color.beansAmber)
+                        .frame(width: 24)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(beansLocalized("启用均衡器", "Enable Equalizer"))
+                            .font(BeansFont.appFont(15, .semibold))
+                            .foregroundStyle(Color.beansLabel)
+                        Text(beansLocalized("播放时实时应用当前调节", "Apply the current tuning while playing"))
+                            .font(BeansFont.appFont(11))
+                            .foregroundStyle(Color.beansComment)
+                    }
+                }
+            }
+            .toggleStyle(.switch)
+            .tint(Color.beansAmber)
+
+            Text(beansLocalized("均衡器仅处理 Beans 当前播放的音乐，不影响其他 App。", "The equalizer only processes music playing in Beans."))
+                .font(BeansFont.appFont(11))
+                .foregroundStyle(Color.beansComment)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Divider().overlay(Color.beansComment.opacity(0.14))
+
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Text(beansLocalized("前级增益", "Preamp"))
+                        .font(BeansFont.appFont(13, .medium))
+                        .foregroundStyle(Color.beansLabel)
+                    Spacer()
+                    Text(String(format: "%+.1f dB", equalizer.preampGain))
+                        .font(BeansFont.appFont(12, .semibold))
+                        .foregroundStyle(abs(equalizer.preampGain) > 0.01 ? Color.beansAmber : Color.beansComment)
+                        .monospacedDigit()
+                }
+                Slider(value: preampBinding, in: -BeansEqualizer.maximumGain...BeansEqualizer.maximumGain, step: 0.5)
+                    .tint(Color.beansAmber)
+                    .transaction { transaction in transaction.animation = nil }
+                HStack {
+                    Text("-12")
+                    Spacer()
+                    Text(beansLocalized("不增益", "Unity"))
+                    Spacer()
+                    Text("+12")
+                }
+                .font(BeansFont.appFont(10))
+                .foregroundStyle(Color.beansComment.opacity(0.75))
+            }
+        }
+        .padding(14)
+        .background { BeansGlass(shape: RoundedRectangle(cornerRadius: 18, style: .continuous)) }
+    }
+
+    private var presetCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(beansLocalized("预设", "Preset"))
+                    .font(BeansFont.appFont(14, .semibold))
+                    .foregroundStyle(Color.beansLabel)
+                Spacer()
+                Menu {
+                    ForEach(BeansEqualizerPreset.allCases.filter { $0 != .custom }) { preset in
+                        Button(preset.displayName) {
+                            equalizer.applyPreset(preset)
+                            BeansHaptics.select()
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(equalizer.selectedCustomPresetName ?? equalizer.selectedPreset.displayName)
+                            .font(BeansFont.appFont(13, .medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(Color.beansAmber)
+                    .padding(.horizontal, 11)
+                    .frame(height: 31)
+                    .background { BeansSurface(shape: Capsule()) }
+                }
+            }
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+                ForEach(BeansEqualizerPreset.allCases.filter { $0 != .custom }) { preset in
+                    let selected = equalizer.selectedPreset == preset
+                    Button {
+                        equalizer.applyPreset(preset)
+                        BeansHaptics.select()
+                    } label: {
+                        Text(preset.displayName)
+                            .font(BeansFont.appFont(11.5, selected ? .semibold : .regular))
+                            .foregroundStyle(selected ? Color.beansAmber : Color.beansLabel)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 30)
+                            .background {
+                                Capsule().fill(selected ? Color.beansAmber.opacity(0.14) : Color.primary.opacity(0.035))
+                            }
+                            .overlay {
+                                Capsule().strokeBorder(selected ? Color.beansAmber.opacity(0.42) : Color.primary.opacity(0.06), lineWidth: 0.8)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if !equalizer.customPresets.isEmpty {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(beansLocalized("我的预设", "My presets"))
+                        .font(BeansFont.appFont(12, .semibold))
+                        .foregroundStyle(Color.beansComment)
+                    ForEach(equalizer.customPresets) { preset in
+                        HStack(spacing: 8) {
+                            Button {
+                                equalizer.applyCustomPreset(preset)
+                                BeansHaptics.select()
+                            } label: {
+                                HStack(spacing: 7) {
+                                    Image(systemName: equalizer.selectedCustomPresetName == preset.name ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(equalizer.selectedCustomPresetName == preset.name ? Color.beansAmber : Color.beansComment)
+                                    Text(preset.name)
+                                        .font(BeansFont.appFont(12.5, .medium))
+                                        .foregroundStyle(Color.beansLabel)
+                                        .lineLimit(1)
+                                    Spacer()
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            Button {
+                                equalizer.deleteCustomPreset(preset)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(Color.beansComment)
+                                    .frame(width: 28, height: 28)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    newPresetName = equalizer.selectedCustomPresetName ?? ""
+                    showPresetNamePrompt = true
+                } label: {
+                    Label(beansLocalized("保存当前预设", "Save current preset"), systemImage: "square.and.arrow.down")
+                        .font(BeansFont.appFont(12.5, .medium))
+                        .foregroundStyle(Color.beansAmber)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 34)
+                        .background { BeansSurface(shape: RoundedRectangle(cornerRadius: 10, style: .continuous)) }
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    equalizer.reset()
+                    BeansHaptics.select()
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.beansComment)
+                        .frame(width: 42, height: 34)
+                        .background { BeansSurface(shape: RoundedRectangle(cornerRadius: 10, style: .continuous)) }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(beansLocalized("重置调节", "Reset adjustments"))
+            }
+        }
+        .padding(14)
+        .background { BeansGlass(shape: RoundedRectangle(cornerRadius: 18, style: .continuous)) }
+    }
+
+    private var bandsCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(beansLocalized("自定义调节", "Custom tuning"))
+                        .font(BeansFont.appFont(14, .semibold))
+                        .foregroundStyle(Color.beansLabel)
+                    Text(beansLocalized("范围 -12 dB 至 +12 dB", "Range: -12 dB to +12 dB"))
+                        .font(BeansFont.appFont(11))
+                        .foregroundStyle(Color.beansComment)
+                }
+                Spacer()
+            }
+
+            ForEach(Array(BeansEqualizer.bandFrequencies.enumerated()), id: \.offset) { index, frequency in
+                equalizerBandRow(index: index, frequency: frequency)
+                if index < BeansEqualizer.bandFrequencies.count - 1 {
+                    Divider().overlay(Color.beansComment.opacity(0.14))
+                }
+            }
+        }
+        .padding(14)
+        .background { BeansGlass(shape: RoundedRectangle(cornerRadius: 18, style: .continuous)) }
+    }
+
+    private func equalizerBandRow(index: Int, frequency: Double) -> some View {
+        let gain = equalizer.bandGains.indices.contains(index) ? equalizer.bandGains[index] : 0
+        return VStack(spacing: 6) {
+            HStack {
+                Text(frequencyLabel(frequency))
+                    .font(BeansFont.appFont(13, .medium))
+                    .foregroundStyle(Color.beansLabel)
+                Spacer()
+                Text(String(format: "%+.1f dB", gain))
+                    .font(BeansFont.appFont(12, .semibold))
+                    .foregroundStyle(abs(gain) > 0.01 ? Color.beansAmber : Color.beansComment)
+                    .monospacedDigit()
+            }
+            Slider(value: gainBinding(index), in: -BeansEqualizer.maximumGain...BeansEqualizer.maximumGain, step: 0.5)
+                .tint(Color.beansAmber)
+                .transaction { transaction in transaction.animation = nil }
+            HStack {
+                Text("-12")
+                Spacer()
+                Text("0")
+                Spacer()
+                Text("+12")
+            }
+            .font(BeansFont.appFont(10))
+            .foregroundStyle(Color.beansComment.opacity(0.75))
+        }
+    }
+
+    private func frequencyLabel(_ frequency: Double) -> String {
+        if frequency >= 1_000 {
+            let value = frequency / 1_000
+            return value.rounded() == value ? "\(Int(value)) kHz" : String(format: "%.1f kHz", value)
+        }
+        return "\(Int(frequency)) Hz"
+    }
+}
+
+private struct EqualizerResponseView: View {
+    let gains: [Double]
+    let preampGain: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(beansLocalized("频响预览", "Response preview"))
+                        .font(BeansFont.appFont(14, .semibold))
+                        .foregroundStyle(Color.beansLabel)
+                    Text(beansLocalized("拖动下方频段，实时塑造声音", "Shape the sound in real time by tuning each band below"))
+                        .font(BeansFont.appFont(11))
+                        .foregroundStyle(Color.beansComment)
+                }
+                Spacer()
+                Image(systemName: "waveform.path")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(Color.beansAmber)
+            }
+
+            GeometryReader { geometry in
+                let width = geometry.size.width
+                let height = geometry.size.height
+                let values = responseValues
+                ZStack {
+                    VStack(spacing: 0) {
+                        ForEach(0..<5, id: \.self) { _ in
+                            Divider().overlay(Color.beansComment.opacity(0.12))
+                            Spacer()
+                        }
+                    }
+                    Path { path in
+                        guard let first = values.first else { return }
+                        path.move(to: CGPoint(x: 0, y: yPosition(first, height: height)))
+                        for index in values.indices.dropFirst() {
+                            let x = width * CGFloat(index) / CGFloat(max(values.count - 1, 1))
+                            path.addLine(to: CGPoint(x: x, y: yPosition(values[index], height: height)))
+                        }
+                    }
+                    .stroke(
+                        LinearGradient(
+                            colors: [Color.beansAmber.opacity(0.65), Color.beansAmber, Color.beansHighlight],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        ),
+                        style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round)
+                    )
+                    Path { path in
+                        guard let first = values.first else { return }
+                        path.move(to: CGPoint(x: 0, y: height))
+                        path.addLine(to: CGPoint(x: 0, y: yPosition(first, height: height)))
+                        for index in values.indices.dropFirst() {
+                            let x = width * CGFloat(index) / CGFloat(max(values.count - 1, 1))
+                            path.addLine(to: CGPoint(x: x, y: yPosition(values[index], height: height)))
+                        }
+                        path.addLine(to: CGPoint(x: width, y: height))
+                        path.closeSubpath()
+                    }
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.beansAmber.opacity(0.22), Color.beansAmber.opacity(0.02)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                }
+            }
+            .frame(height: 108)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.primary.opacity(0.035))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.7)
+            }
+
+            HStack {
+                Text("31 Hz")
+                Spacer()
+                Text("1 kHz")
+                Spacer()
+                Text("16 kHz")
+            }
+            .font(BeansFont.appFont(10))
+            .foregroundStyle(Color.beansComment)
+        }
+        .padding(14)
+        .background { BeansGlass(shape: RoundedRectangle(cornerRadius: 18, style: .continuous)) }
+    }
+
+    private var responseValues: [Double] {
+        guard !gains.isEmpty else { return [preampGain] }
+        return gains.map { min(max($0 + preampGain * 0.35, -12), 12) }
+    }
+
+    private func yPosition(_ value: Double, height: CGFloat) -> CGFloat {
+        let normalized = (value + 12) / 24
+        return height * CGFloat(1 - normalized)
     }
 }
 

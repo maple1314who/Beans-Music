@@ -12,6 +12,7 @@ struct PlaylistView: View {
     @EnvironmentObject private var player: PlayerManager
     @EnvironmentObject private var auth: AuthStore
     @EnvironmentObject private var theme: ThemeStore
+    @ObservedObject private var favorites = FavoritesStore.shared
 
     let playlist: Playlist
     @State private var tracks: [Song] = []
@@ -19,25 +20,44 @@ struct PlaylistView: View {
     @State private var errorMessage: String?
     @State private var searchText = ""
     @State private var sortMode: PlaylistSortMode = .original
+    @AppStorage("beans.homeHeaderHideSort") private var hideSortButton = false
+    @AppStorage("beans.uiStyle") private var uiStyleRaw = BeansUIStyle.liquid.rawValue
+
+    private var isNativeClean: Bool {
+        BeansUIStyle(rawValue: uiStyleRaw) == .nativeClean
+    }
+
+    private var cacheAccountID: String {
+        switch playlist.source {
+        case .netease:
+            return "\(auth.user?.uid ?? 0)"
+        case .qq:
+            let qqAuth = QQMusicAuth.shared
+            return qqAuth.rawUin.isEmpty ? qqAuth.playlistUin : qqAuth.rawUin
+        case .kugou:
+            return KugouMusicAuth.shared.userId
+        }
+    }
 
     var body: some View {
         let _ = theme.accent
-        BeansNavigationStack {
-            ZStack {
+        ZStack {
                 GlassBackdrop(customColor: theme.backgroundSyncAll ? theme.customBackground : nil)
                 Group {
                 if loading {
                     LoadingStateView()
                 } else if let errorMessage {
                     ErrorStateView(message: errorMessage) {
-                        Task { await load() }
+                        Task { await load(force: true) }
                     }
                 } else {
                     List {
                         header
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
                         Section {
                             ForEach(Array(displayedTracks.enumerated()), id: \.element.identityKey) { index, song in
-                                SongCell(song: song, glassRow: true) {
+                                SongCell(song: song, glassRow: true, playbackContext: displayedTracks, playbackIndex: index) {
                                     player.play(songs: displayedTracks, startAt: index)
                                 }
                                 .listRowBackground(Color.clear)
@@ -52,13 +72,12 @@ struct PlaylistView: View {
             }
             .navigationTitle(playlist.name)
             .navigationBarTitleDisplayMode(.inline)
-        }
         .task { await load() }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 14) {
+            HStack(spacing: isNativeClean ? 18 : 14) {
                 CoverImage(url: playlist.coverURL, size: 96, cornerRadius: 18)
                 VStack(alignment: .leading, spacing: 6) {
                     Text(playlist.name)
@@ -70,7 +89,7 @@ struct PlaylistView: View {
                             .font(BeansFont.appFont(12))
                             .foregroundStyle(Color.beansComment)
                     }
-                    Text("\(tracks.count) 首")
+                    Text(beansSongCountText(tracks.count))
                         .font(BeansFont.appFont(12))
                         .foregroundStyle(Color.beansComment)
                 }
@@ -91,7 +110,7 @@ struct PlaylistView: View {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 13))
                         .foregroundStyle(Color.beansComment)
-                    TextField("搜索歌单内歌曲", text: $searchText)
+                    TextField(beansLocalized("搜索歌单内歌曲", "Search songs in playlist"), text: $searchText)
                         .font(BeansFont.appFont(14))
                         .autocorrectionDisabled()
                     if !searchText.isEmpty {
@@ -107,28 +126,28 @@ struct PlaylistView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .background { BeansSurface(shape: RoundedRectangle(cornerRadius: 14, style: .continuous)) }
 
-                Menu {
-                    Picker("排序", selection: $sortMode) {
-                        ForEach(PlaylistSortMode.allCases) { mode in
-                            Text(mode.rawValue).tag(mode)
+                if !hideSortButton {
+                    Menu {
+                        Picker("排序", selection: $sortMode) {
+                            ForEach(PlaylistSortMode.allCases) { mode in
+                                Text(LocalizedStringKey(mode.rawValue)).tag(mode)
+                            }
                         }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Color.beansAmber)
+                            .frame(width: 38, height: 38)
+                            .background { BeansSurface(shape: Circle()) }
                     }
-                } label: {
-                    Image(systemName: "arrow.up.arrow.down")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.beansAmber)
-                        .frame(width: 38, height: 38)
-                        .background(.ultraThinMaterial, in: Circle())
+                    .buttonStyle(GlassPressButtonStyle())
                 }
-                .buttonStyle(GlassPressButtonStyle())
             }
         }
         .padding(14)
-        .background {
-                        BeansGlass(shape: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        }
+        .background { BeansSurface(shape: RoundedRectangle(cornerRadius: 24, style: .continuous)) }
     }
 
     /// 歌单内搜索 + 排序后的列表
@@ -152,20 +171,45 @@ struct PlaylistView: View {
         return list
     }
 
-    private func load() async {
-        loading = true
+    private func load(force: Bool = false) async {
+        let cache = SyncedPlaylistCache.shared
+        if let cached = cache.cachedSongs(playlist: playlist, accountID: cacheAccountID) {
+            tracks = cached.songs
+            loading = false
+            if !force, cache.isFresh(cached) {
+                return
+            }
+        } else {
+            loading = true
+        }
         errorMessage = nil
+        BeansLogger.shared.log("歌单页面打开 source=\(playlist.source.rawValue) id=\(playlist.id) name=\(playlist.name) advertisedCount=\(playlist.trackCount)", level: .info)
         do {
             if playlist.source == .kugou {
                 tracks = try await KugouMusicAPI.shared.playlistSongs(listID: playlist.id)
             } else if playlist.source == .qq {
                 tracks = try await QQMusicAPI.shared.playlistSongs(listID: playlist.id)
+                // 云端收藏接口临时被风控或返回空时，至少展示已同步到本机的 QQ 收藏，
+                // 避免“我的喜欢”进入后变成空白页面。
+                if tracks.isEmpty, playlist.id == QQMusicAPI.qqLikedPlaylistID {
+                    tracks = favorites.qqFavoriteSongs
+                    BeansLogger.shared.log("QQ 我的喜欢页面网络结果为空，使用本地收藏回退 count=\(tracks.count)", level: tracks.isEmpty ? .warn : .info)
+                }
             } else {
                 tracks = try await NetEaseAPI.shared.playlistTracks(id: playlist.id)
             }
+            if !tracks.isEmpty {
+                cache.saveSongs(tracks, playlist: playlist, accountID: cacheAccountID)
+            }
+            BeansLogger.shared.log("歌单页面加载完成 source=\(playlist.source.rawValue) id=\(playlist.id) name=\(playlist.name) count=\(tracks.count) error=无", level: tracks.isEmpty ? .warn : .info)
             loading = false
         } catch {
-            errorMessage = error.localizedDescription
+            if tracks.isEmpty {
+                errorMessage = error.localizedDescription
+            } else {
+                BeansLogger.shared.log("歌单页面刷新失败，继续使用缓存 source=\(playlist.source.rawValue) id=\(playlist.id) error=\(error.localizedDescription)", level: .warn)
+            }
+            BeansLogger.shared.log("歌单页面加载失败 source=\(playlist.source.rawValue) id=\(playlist.id) name=\(playlist.name) error=\(error.localizedDescription)", level: .error)
             loading = false
         }
     }

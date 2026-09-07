@@ -1,29 +1,72 @@
-import Foundation
+import QuartzCore
+import SwiftUI
+import UIKit
 
-/// 可选高刷新率保持器。配合 Info.plist 的 CADisableMinimumFrameDurationOnPhone 解开 60fps 上限。
+/// 全局高刷新率保持器，配合 Info.plist 请求设备支持的最高刷新率。
 final class HighRefreshKeeper {
     static let shared = HighRefreshKeeper()
-    private var enabled = true
+    static let defaultsKey = "beans.enableHighRefresh"
+
+    private var displayLink: CADisplayLink?
 
     private init() {}
 
     static func registerDefaults() {
-        UserDefaults.standard.register(defaults: ["beans.enableHighRefresh": true])
+        UserDefaults.standard.register(defaults: [defaultsKey: true])
+        UserDefaults.standard.set(true, forKey: defaultsKey)
     }
 
     func configureFromDefaults() {
-        configure(enabled: UserDefaults.standard.bool(forKey: "beans.enableHighRefresh"))
+        configure(enabled: UserDefaults.standard.bool(forKey: Self.defaultsKey))
     }
 
     func configure(enabled: Bool) {
-        self.enabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.defaultsKey)
+        if enabled {
+            start()
+        } else {
+            stop()
+        }
     }
 
-    func start() {
-        enabled = true
+    func attach(to view: UIView) {
+        _ = view
+        start()
     }
 
-    func stop() {
-        enabled = false
+    private func start() {
+        guard displayLink == nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(tick))
+        if #available(iOS 15.0, *) {
+            let maximum = Float(min(120, max(60, UIScreen.main.maximumFramesPerSecond)))
+            link.preferredFrameRateRange = CAFrameRateRange(
+                minimum: maximum >= 120 ? 120 : maximum,
+                maximum: maximum,
+                preferred: maximum
+            )
+        } else {
+            link.preferredFramesPerSecond = 120
+        }
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    private func stop() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    @objc private func tick() {}
+}
+
+struct HighRefreshConfigurator: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        HighRefreshKeeper.shared.attach(to: uiView)
     }
 }

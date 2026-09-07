@@ -3,6 +3,7 @@ import SwiftUI
 struct AddToPlaylistSheet: View {
     @EnvironmentObject private var theme: ThemeStore
     @EnvironmentObject private var auth: AuthStore
+    private let favorites = FavoritesStore.shared
     @Environment(\.dismiss) private var dismiss
 
     let song: Song
@@ -30,7 +31,7 @@ struct AddToPlaylistSheet: View {
                                             .font(BeansFont.appFont(15))
                                             .foregroundStyle(Color.beansLabel)
                                             .lineLimit(1)
-                                        Text("\(playlist.trackCount) 首")
+                                        Text(beansSongCountText(playlist.trackCount))
                                             .font(BeansFont.appFont(11))
                                             .foregroundStyle(Color.beansComment)
                                     }
@@ -77,6 +78,9 @@ struct AddToPlaylistSheet: View {
     private func add(to playlist: Playlist) async {
         let ok = (try? await NetEaseAPI.shared.addToPlaylist(playlistID: playlist.id, songIDs: [song.id])) ?? false
         if ok {
+            if !favorites.isLiked(song) {
+                _ = await favorites.toggle(song)
+            }
             dismiss()
         } else {
             message = "添加失败，请重试"
@@ -90,6 +94,9 @@ struct AddToPlaylistSheet: View {
             let playlistID = try await NetEaseAPI.shared.createPlaylist(name: name)
             let ok = try await NetEaseAPI.shared.addToPlaylist(playlistID: playlistID, songIDs: [song.id])
             if ok {
+                if !favorites.isLiked(song) {
+                    _ = await favorites.toggle(song)
+                }
                 try? await auth.loadLibrary()
                 dismiss()
             } else {
