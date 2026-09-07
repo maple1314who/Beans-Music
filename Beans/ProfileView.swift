@@ -127,7 +127,6 @@ struct ProfileView: View {
                     }
                     // 更新入口固定放在“我的”页面最底部，避免被板块排序隐藏。
                     updateLinkCard
-                    communityCard
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
@@ -503,7 +502,7 @@ struct ProfileView: View {
                     .foregroundStyle(Color.beansComment.opacity(0.85))
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("本软件完全免费，全部功能开源 · GitHub：XIaodou0416/Beans-Music")
+                Text("本软件完全免费，全部功能开源 · GitHub：maple1314who/Beans-Music")
                     .font(BeansFont.appFont(11, .semibold))
                     .foregroundStyle(Color.beansAmber)
                     .multilineTextAlignment(.center)
@@ -589,7 +588,7 @@ struct ProfileView: View {
         VStack(spacing: 0) {
             Button {
                 BeansHaptics.tap()
-                if let url = URL(string: "https://github.com/XIaodou0416/Beans-Music") {
+                if let url = URL(string: "https://github.com/maple1314who/Beans-Music") {
                     UIApplication.shared.open(url)
                 }
             } label: {
@@ -602,7 +601,7 @@ struct ProfileView: View {
                         Text("更新地址")
                             .font(BeansFont.appFont(14, .semibold))
                             .foregroundStyle(Color.beansLabel)
-                        Text("GitHub：XIaodou0416/Beans-Music")
+                        Text("GitHub：maple1314who/Beans-Music")
                             .font(BeansFont.appFont(11))
                             .foregroundStyle(Color.beansComment)
                             .lineLimit(1)
@@ -672,85 +671,6 @@ struct ProfileView: View {
         .beansCardShadow(radius: 9, y: 3)
     }
 
-    /// 我的页底部交流群入口
-    private var communityCard: some View {
-        Button {
-            BeansHaptics.tap()
-            if let url = URL(string: "https://t.me/+k8oYhsIU4sgzOTM1") {
-                UIApplication.shared.open(url)
-            }
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "person.2.fill")
-                    .font(.system(size: 15))
-                    .foregroundStyle(Color.beansHighlight)
-                    .frame(width: 28)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("交流群")
-                        .font(BeansFont.appFont(14, .semibold))
-                        .foregroundStyle(Color.beansLabel)
-                    Text("点击跳转 Telegram")
-                        .font(BeansFont.appFont(11))
-                        .foregroundStyle(Color.beansComment)
-                }
-                Spacer()
-                Image(systemName: "arrow.up.forward.app")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Color.beansComment)
-            }
-            .padding(16)
-            .background {
-                BeansGlass(shape: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            }
-        }
-        .buttonStyle(GlassPressButtonStyle(scale: 0.98))
-        .beansCardShadow(radius: 9, y: 3)
-    }
-}
-
-// MARK: - 交流群二维码
-
-struct CommunityQRSheet: View {
-    @EnvironmentObject private var theme: ThemeStore
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        BeansNavigationStack {
-            ZStack {
-                GlassBackdrop(customColor: theme.backgroundSyncAll ? theme.customBackground : nil)
-                VStack(spacing: 18) {
-                    Image("CommunityQR")
-                        .resizable()
-                        .interpolation(.none)
-                        .scaledToFit()
-                        .padding(12)
-                        .background(Color.white, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                .strokeBorder(Color.beansComment.opacity(0.16), lineWidth: 0.8)
-                        }
-                        .padding(.horizontal, 24)
-                    Text("扫码加入交流群")
-                        .font(BeansFont.appFont(15, .semibold))
-                        .foregroundStyle(Color.beansLabel)
-                    Text("如二维码过期，可在 GitHub 或更新说明中获取最新入口")
-                        .font(BeansFont.appFont(11))
-                        .foregroundStyle(Color.beansComment)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 30)
-                }
-                .padding(.vertical, 22)
-            }
-            .navigationTitle("交流群")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
-                }
-            }
-        }
-        .modifier(BeansSheetModifier(detents: [.medium, .large]))
-    }
 }
 
 // MARK: - 统一账号登录面板（网易云 + QQ 音乐整合）

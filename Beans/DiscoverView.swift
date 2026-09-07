@@ -65,7 +65,10 @@ struct DiscoverView: View {
                 ScrollViewReader { proxy in
                 VStack(alignment: .leading, spacing: 26) {
                     header
-                    providerPicker
+                    HStack(spacing: 8) {
+                        providerPicker
+                        PlatformKugouToggleButton()
+                    }
                     if let errorMessage {
                         ErrorStateView(message: errorMessage) {
                             Task { await load(force: true) }

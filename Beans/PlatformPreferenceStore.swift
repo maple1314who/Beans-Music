@@ -137,3 +137,38 @@ struct PlatformPreferencePicker: View {
         }
     }
 }
+
+/// 酷狗音乐显隐快捷按钮（放置于发现页 / 搜索页平台切换栏右侧）。
+/// 酷狗显示中 → 点击隐藏；酷狗已隐藏 → 按钮高亮，点击恢复。
+struct PlatformKugouToggleButton: View {
+    @ObservedObject private var store = PlatformPreferenceStore.shared
+
+    private var kugouVisible: Bool { store.isEnabled(SearchProvider.kugou) }
+
+    var body: some View {
+        GlassIconButton(
+            systemName: kugouVisible ? "eye" : "eye.slash",
+            size: 42,
+            active: !kugouVisible
+        ) {
+            BeansHaptics.select()
+            toggleKugou()
+        }
+        .accessibilityLabel(kugouVisible ? "隐藏酷狗音乐" : "恢复酷狗音乐")
+    }
+
+    private func toggleKugou() {
+        if kugouVisible {
+            // 至少要保留一个平台
+            guard store.enabledSearchProviders.count > 1 else {
+                ToastCenter.shared.show("至少保留一个平台")
+                return
+            }
+            store.set(.kugou, enabled: false)
+            ToastCenter.shared.show("已隐藏酷狗音乐")
+        } else {
+            store.set(.kugou, enabled: true)
+            ToastCenter.shared.show("已恢复酷狗音乐")
+        }
+    }
+}
