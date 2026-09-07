@@ -121,7 +121,10 @@ struct DiscoverView: View {
                     VStack(alignment: .leading, spacing: isNativeClean ? 34 : 26) {
                         header
                         if !hidePlatformPicker {
-                            providerPicker
+                            HStack(spacing: 8) {
+                                providerPicker
+                                PlatformKugouToggleButton()
+                            }
                         }
                         if let errorMessage {
                             ErrorStateView(message: errorMessage) {

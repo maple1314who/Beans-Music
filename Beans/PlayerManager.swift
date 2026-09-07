@@ -502,14 +502,18 @@ final class PlayerManager: NSObject, ObservableObject {
             if song.source == .kugou {
                 urlString = try? await KugouMusicAPI.shared.songURL(song: song, quality: quality)
                 if urlString == nil {
-                    resolvedThirdParty = await kugouFallback(
-                        song: song,
-                        thirdPartyQuality: thirdPartyQuality,
-                        enableUnblock: enableUnblock
-                    )
+                    // 会员感知跨平台切换：酷狗无会员时，用有会员的平台搜同名歌播放
+                    urlString = await membershipCrossFallback(song: song, quality: quality, strict: strictUnlock)
+                    if urlString == nil {
+                        resolvedThirdParty = await kugouFallback(
+                            song: song,
+                            thirdPartyQuality: thirdPartyQuality,
+                            enableUnblock: enableUnblock
+                        )
+                    }
                 }
             } else if song.source == .qq, let mid = song.qqMid {
-                // QQ 官方地址失败后只走 QQ 第三方音源，不跨平台匹配同名歌曲。
+                // QQ 官方地址失败后先会员切换，再走 QQ 第三方音源兜底。
                 let officialResult = try? await QQMusicAPI.shared.songURLResult(
                     songmid: mid,
                     mediaMid: song.qqMediaMid,
@@ -519,22 +523,34 @@ final class PlayerManager: NSObject, ObservableObject {
                 qqOfficialBR = officialResult?.br
                 attemptedQQOfficialBRs = officialResult?.attemptedBRs ?? []
                 if urlString == nil {
-                    (urlString, resolvedThirdParty) = await qqFallback(
-                        song: song,
-                        quality: quality,
-                        thirdPartyQuality: thirdPartyQuality,
-                        enableUnblock: enableUnblock,
-                        strict: strictUnlock
-                    )
+                    // 会员感知跨平台切换：QQ 无会员时，用有会员的平台搜同名歌播放
+                    urlString = await membershipCrossFallback(song: song, quality: quality, strict: strictUnlock)
+                    if urlString == nil {
+                        (urlString, resolvedThirdParty) = await qqFallback(
+                            song: song,
+                            quality: quality,
+                            thirdPartyQuality: thirdPartyQuality,
+                            enableUnblock: enableUnblock,
+                            strict: strictUnlock
+                        )
+                    }
                 }
             } else {
-                (urlString, resolvedThirdParty) = await neteaseResolve(
-                    song: song,
-                    quality: quality,
-                    thirdPartyQuality: thirdPartyQuality,
-                    enableUnblock: enableUnblock,
-                    strict: strictUnlock
-                )
+                // 网易云：先官方解析（含音质回落），失败后会员切换，再第三方音源兜底
+                urlString = await neteaseOfficialURL(song: song, quality: quality)
+                if urlString == nil {
+                    urlString = await membershipCrossFallback(song: song, quality: quality, strict: strictUnlock)
+                    if urlString == nil, enableUnblock {
+                        resolvedThirdParty = await UnblockService.resolve(
+                            name: song.name,
+                            artists: song.artists,
+                            neteaseID: song.id,
+                            songSource: .netease,
+                            quality: thirdPartyQuality,
+                            strict: strictUnlock
+                        )
+                    }
+                }
             }
             if let resolved = resolvedThirdParty {
                 let notice = self.thirdPartyVIPNotice(for: song, sourceTitle: resolved.sourceTitle)
@@ -580,16 +596,8 @@ final class PlayerManager: NSObject, ObservableObject {
         }
     }
 
-    /// 网易云播放地址解析：按设置音质取 URL，VIP/灰色歌曲交给第三方解锁。
-    private func neteaseResolve(
-        song: Song,
-        quality: BeansAudioQuality,
-        thirdPartyQuality: ThirdPartyAudioQuality = .current,
-        enableUnblock: Bool,
-        strict: Bool = false
-    ) async -> (String?, UnblockService.Resolved?) {
-        var urlString: String?
-        var resolved: UnblockService.Resolved?
+    /// 网易云官方播放地址解析（含高音质回落标准音质）。不触发第三方音源与跨平台兜底。
+    private func neteaseOfficialURL(song: Song, quality: BeansAudioQuality) async -> String? {
         let infos = try? await NetEaseAPI.shared.songURLInfo(ids: [song.id], level: quality.level)
         var info = infos?[song.id]
         if (info?.url == nil || info?.freeTrial == true), quality != .standard {
@@ -597,23 +605,10 @@ final class PlayerManager: NSObject, ObservableObject {
             let fallback = try? await NetEaseAPI.shared.songURLInfo(ids: [song.id], level: "standard")
             info = fallback?[song.id]
         }
-        BeansLogger.shared.log("网易云解析：\(song.name) 音质=\(quality.level) 官方URL=\(info?.url == nil ? "无" : "有") 试听=\(info?.freeTrial == true ? "是" : "否")", level: .debug)
-        // 试听片段 / 无 URL 一律不直接播放，交给第三方解锁，避免"只能试听"
-        if let u = info?.url, info?.freeTrial != true {
-            urlString = u
-        }
-        if urlString == nil, enableUnblock {
-            resolved = await UnblockService.resolve(
-                name: song.name,
-                artists: song.artists,
-                neteaseID: song.id,
-                songSource: .netease,
-                quality: thirdPartyQuality,
-                strict: strict
-            )
-        }
-        BeansLogger.shared.log("网易云结果：\(song.name) 官方=\(urlString != nil ? "是" : "否") 第三方=\(resolved != nil ? "命中" : "未用/未命中")", level: .debug)
-        return (urlString, resolved)
+        BeansLogger.shared.log("网易云官方解析：\(song.name) 音质=\(quality.level) 官方URL=\(info?.url == nil ? "无" : "有") 试听=\(info?.freeTrial == true ? "是" : "否")", level: .debug)
+        // 试听片段 / 无 URL 一律视为失败，交给后续会员切换或第三方解锁，避免"只能试听"
+        guard let u = info?.url, info?.freeTrial != true else { return nil }
+        return u
     }
 
     /// QQ 歌曲兜底：官方失败后只走 QQ 第三方接口，不跨平台匹配同名歌曲。
@@ -723,6 +718,84 @@ final class PlayerManager: NSObject, ObservableObject {
         }
         // 找不到可靠匹配：宁可播放失败，也不播放错误歌曲
         return nil
+    }
+
+    // MARK: - 会员感知跨平台切换
+
+    /// 会员感知跨平台切换：当前平台无会员时，依次用其他“有会员”的平台搜同名歌并取完整播放地址。
+    /// 当前平台有会员时直接返回 nil（不干扰正常播放链路）。命中后播放地址来自目标平台，歌词/封面仍按原歌曲加载。
+    private func membershipCrossFallback(song: Song, quality: BeansAudioQuality, strict: Bool) async -> String? {
+        guard !hasMembership(for: song.source) else { return nil }
+        // 候选平台优先级：QQ → 网易云 → 酷狗，跳过当前平台、跳过无会员的平台
+        let candidates: [SongSource] = [.qq, .netease, .kugou].filter {
+            $0 != song.source && hasMembership(for: $0)
+        }
+        guard !candidates.isEmpty else { return nil }
+        let durationMS = Int(song.duration * 1000)
+        for target in candidates {
+            guard let matched = await matchSong(name: song.name, artists: song.artists, durationMS: durationMS, strict: strict, on: target) else { continue }
+            guard let url = await resolveURL(matched: matched, on: target, quality: quality) else { continue }
+            BeansLogger.shared.log("会员跨平台命中：\(song.name) \(song.source.rawValue)→\(target.rawValue)（有会员）", level: .info)
+            return url
+        }
+        return nil
+    }
+
+    /// 在指定平台按 歌名+歌手+时长 匹配同名歌曲
+    private func matchSong(name: String, artists: String, durationMS: Int, strict: Bool, on target: SongSource) async -> Song? {
+        let keyword = ([name, artists].filter { !$0.isEmpty }).joined(separator: " ")
+        guard !keyword.isEmpty else { return nil }
+        let results: [Song]?
+        switch target {
+        case .netease:
+            results = try? await NetEaseAPI.shared.search(keyword: keyword, limit: 8)
+        case .qq:
+            results = try? await QQMusicAPI.shared.searchSongs(keyword: keyword, limit: 8)
+        case .kugou:
+            results = try? await KugouMusicAPI.shared.searchSongs(keyword: keyword, limit: 8)
+        }
+        guard let results, !results.isEmpty else { return nil }
+        return bestMatch(from: results, name: name, artists: artists, durationMS: durationMS, strict: strict)
+    }
+
+    /// 匹配核心：优先“歌手匹配 + 时长接近”，严格模式找不到原唱直接放弃，最后才按最接近时长兜底
+    private func bestMatch(from results: [Song], name: String, artists: String, durationMS: Int, strict: Bool) -> Song? {
+        let target = Double(durationMS) / 1000.0
+        let artistTokens = artists.lowercased().split(whereSeparator: { $0 == " " || $0 == "/" || $0 == "&" }).map(String.init)
+        if let hit = results.first(where: { song in
+            let durOK = abs(song.duration - target) < 12
+            let songArtists = song.artists.lowercased()
+            let artistOK = artistTokens.contains { !$0.isEmpty && songArtists.contains($0) }
+                || (songArtists.contains("周杰伦") && artists.lowercased().contains("jay chou"))
+            return durOK && artistOK
+        }) { return hit }
+        if strict { return nil }
+        if let hit = results.min(by: { abs($0.duration - target) < abs($1.duration - target) }),
+           abs(hit.duration - target) < 20 {
+            return hit
+        }
+        return nil
+    }
+
+    /// 用目标平台的接口解析匹配到的歌曲的完整播放地址
+    private func resolveURL(matched: Song, on target: SongSource, quality: BeansAudioQuality) async -> String? {
+        switch target {
+        case .netease:
+            let infos = try? await NetEaseAPI.shared.songURLInfo(ids: [matched.id], level: quality.level)
+            var info = infos?[matched.id]
+            if (info?.url == nil || info?.freeTrial == true), quality != .standard {
+                let fallback = try? await NetEaseAPI.shared.songURLInfo(ids: [matched.id], level: "standard")
+                info = fallback?[matched.id]
+            }
+            guard let u = info?.url, info?.freeTrial != true else { return nil }
+            return u
+        case .qq:
+            guard let mid = matched.qqMid, !mid.isEmpty else { return nil }
+            let result = try? await QQMusicAPI.shared.songURLResult(songmid: mid, mediaMid: matched.qqMediaMid, quality: quality)
+            return result?.url
+        case .kugou:
+            return try? await KugouMusicAPI.shared.songURL(song: matched, quality: quality)
+        }
     }
 
     /// 仅在高音质地址已经交给 AVPlayer 但实际无法打开时回退标准音质。

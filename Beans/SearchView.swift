@@ -138,9 +138,12 @@ struct SearchView: View {
                     .padding(.bottom, 10)
 
                 if !hidePlatformPicker {
-                    providerPicker
-                        .padding(.horizontal, 20)
-                        .padding(.bottom, 8)
+                    HStack(spacing: 8) {
+                        providerPicker
+                        PlatformKugouToggleButton()
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 8)
                 }
 
                 contentArea
