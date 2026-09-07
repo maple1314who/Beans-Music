@@ -990,6 +990,14 @@ struct SettingsView: View {
     @State private var backupIncludeAccounts = false
     @State private var backupIncludeWallpapers = false
     @State private var backupMessage: String?
+    @State private var webdavURL = ""
+    @State private var webdavUsername = ""
+    @State private var webdavPassword = ""
+    @State private var webdavBusy = false
+    @State private var showWebDAVBrowser = false
+    @AppStorage("beans.webdav.autoSyncEnabled") private var autoSyncEnabled = false
+    @AppStorage("beans.webdav.autoSyncInterval") private var autoSyncInterval = 30
+    @State private var autoSyncTimer: Timer?
     /// 日志
     @State private var showLogViewer = false
 
@@ -1314,6 +1322,12 @@ struct SettingsView: View {
             EqualizerSettingsView()
                 .environmentObject(theme)
         }
+        .sheet(isPresented: $showWebDAVBrowser) {
+            WebDAVBrowserSheet(initialPath: webdavURL) { selected in
+                webdavURL = selected
+                persistWebDAVConfig()
+            }
+        }
         .fullScreenCover(isPresented: $showRestorePicker) {
             BackupDocumentPicker { url in
                 handleBackupImport(url)
@@ -1328,6 +1342,9 @@ struct SettingsView: View {
         }
         .onAppear {
             homeRenderingPaused = true
+            if autoSyncEnabled {
+                startAutoSync()
+            }
         }
         .onDisappear {
             homeRenderingPaused = false
@@ -2390,6 +2407,87 @@ struct SettingsView: View {
                     showRestorePicker = true
                 }
             }
+            // WebDAV 云同步
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 6) {
+                    Image(systemName: "cloud.fill")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Color.beansAmber)
+                    Text("WebDAV 云同步")
+                        .font(BeansFont.appFont(14, .semibold))
+                        .foregroundStyle(Color.beansLabel)
+                }
+                HStack(spacing: 8) {
+                    TextField("服务器地址（如 https://dav.jianguoyun.com/dav/）", text: $webdavURL)
+                        .font(BeansFont.appFont(13))
+                        .textInputAutocapitalization(.never)
+                        .disableAutocorrection(true)
+                        .padding(10)
+                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    Button {
+                        BeansHaptics.tap()
+                        persistWebDAVConfig()
+                        showWebDAVBrowser = true
+                    } label: {
+                        Label("浏览", systemImage: "folder")
+                            .font(BeansFont.appFont(13, .semibold))
+                            .foregroundStyle(Color.beansAmber)
+                    }
+                    .buttonStyle(.plain)
+                }
+                TextField("用户名", text: $webdavUsername)
+                    .font(BeansFont.appFont(13))
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+                    .padding(10)
+                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                SecureField("密码", text: $webdavPassword)
+                    .font(BeansFont.appFont(13))
+                    .padding(10)
+                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                HStack(spacing: 10) {
+                    backupActionButton(icon: "arrow.up.to.line", title: "上传到 WebDAV") {
+                        BeansHaptics.tap()
+                        uploadToWebDAV()
+                    }
+                    .disabled(webdavBusy)
+                    backupActionButton(icon: "arrow.down.to.line", title: "从 WebDAV 下载") {
+                        BeansHaptics.tap()
+                        downloadFromWebDAV()
+                    }
+                    .disabled(webdavBusy)
+                }
+                if webdavBusy {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                        Text("正在同步…")
+                            .font(BeansFont.appFont(11))
+                            .foregroundStyle(Color.beansComment)
+                    }
+                }
+                Divider().opacity(0.35)
+                Toggle("自动同步", isOn: $autoSyncEnabled)
+                    .tint(Color.beansAmber)
+                    .font(BeansFont.appFont(13))
+                    .onChange(of: autoSyncEnabled) { enabled in
+                        if enabled { startAutoSync() } else { stopAutoSync() }
+                    }
+                if autoSyncEnabled {
+                    Stepper(value: $autoSyncInterval, in: 1...1440, step: 5) {
+                        Text("每 \(autoSyncInterval) 分钟自动同步")
+                            .font(BeansFont.appFont(13))
+                            .foregroundStyle(Color.beansLabel)
+                    }
+                    .onChange(of: autoSyncInterval) { _ in
+                        if autoSyncEnabled { startAutoSync() }
+                    }
+                }
+            }
+            .padding(14)
+            .background {
+                BeansGlass(shape: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            }
+            .onAppear { loadWebDAVConfig() }
             if let backupMessage {
                 Text(backupMessage)
                     .font(BeansFont.appFont(11))
@@ -2465,8 +2563,8 @@ struct SettingsView: View {
             || key == "beans.font.restore"
     }
 
-    /// 导出：收集本 App 设置，排除账号、搜索记录和日志，交给系统原生导出面板
-    private func exportBackup(includeAccounts: Bool, includeWallpapers: Bool) {
+    /// 生成备份 JSON 数据（供系统导出面板与 WebDAV 上传共用）
+    private func buildBackupData(includeAccounts: Bool, includeWallpapers: Bool) -> Data? {
         let defaults = UserDefaults.standard
         var payload: [String: Any] = [:]
         if includeWallpapers {
@@ -2507,12 +2605,135 @@ struct SettingsView: View {
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
             backupMessage = "备份生成失败：存在无法序列化的设置项"
             ToastCenter.shared.show("备份生成失败")
-            return
+            return nil
         }
-        backupDoc = BackupDocument(data: data)
         backupMessage = nil
         BeansLogger.shared.log("导出配置备份（\(payload.count) 项，账号=\(includeAccounts ? "包含" : "排除") 壁纸=\(includeWallpapers ? "包含" : "排除")）", level: .info)
+        return data
+    }
+
+    /// 导出：收集本 App 设置，排除账号、搜索记录和日志，交给系统原生导出面板
+    private func exportBackup(includeAccounts: Bool, includeWallpapers: Bool) {
+        guard let data = buildBackupData(includeAccounts: includeAccounts, includeWallpapers: includeWallpapers) else { return }
+        backupDoc = BackupDocument(data: data)
         showExportBackup = true
+    }
+
+    /// 双向智能同步：比较远端与本地时间，谁新用谁
+    private func webdavSyncNow() {
+        let store = WebDAVBackupStore.shared
+        Task {
+            do {
+                let remoteData = try await store.fetchRemoteBackup()
+                let remoteDate = remoteData.flatMap { store.remoteBackupDate($0) }
+                let lastSync = store.lastSyncDate
+                if let remoteDate, let lastSync, remoteDate > lastSync {
+                    // 远端更新 → 拉取恢复
+                    if let data = remoteData,
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        await MainActor.run {
+                            pendingRestore = json
+                            showRestoreConfirm = true
+                        }
+                    }
+                } else {
+                    // 本地为准 → 推送
+                    let data = await MainActor.run {
+                        buildBackupData(includeAccounts: backupIncludeAccounts, includeWallpapers: backupIncludeWallpapers)
+                    }
+                    if let data {
+                        try await store.upload(data)
+                    }
+                }
+                store.lastSyncDate = Date()
+                BeansLogger.shared.log("WebDAV 自动同步完成", level: .info)
+            } catch {
+                BeansLogger.shared.log("WebDAV 自动同步失败：\(error.localizedDescription)", level: .debug)
+            }
+        }
+    }
+
+    private func startAutoSync() {
+        stopAutoSync()
+        guard autoSyncEnabled else { return }
+        let interval = TimeInterval(max(1, autoSyncInterval) * 60)
+        autoSyncTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
+            self.webdavSyncNow()
+        }
+        RunLoop.main.add(autoSyncTimer!, forMode: .common)
+        webdavSyncNow()
+    }
+
+    private func stopAutoSync() {
+        autoSyncTimer?.invalidate()
+        autoSyncTimer = nil
+    }
+
+    /// 读取 WebDAV 配置到输入框
+    private func loadWebDAVConfig() {
+        let c = WebDAVBackupStore.shared.config
+        webdavURL = c.baseURL
+        webdavUsername = c.username
+        webdavPassword = c.password
+    }
+
+    /// 保存当前输入框的 WebDAV 配置
+    private func persistWebDAVConfig() {
+        WebDAVBackupStore.shared.save(
+            WebDAVConfig(
+                baseURL: webdavURL.trimmingCharacters(in: .whitespacesAndNewlines),
+                username: webdavUsername,
+                password: webdavPassword,
+                filename: "beans-backup.json"
+            )
+        )
+    }
+
+    /// 上传备份到 WebDAV
+    private func uploadToWebDAV() {
+        persistWebDAVConfig()
+        guard let data = buildBackupData(includeAccounts: backupIncludeAccounts, includeWallpapers: backupIncludeWallpapers) else { return }
+        webdavBusy = true
+        Task {
+            do {
+                try await WebDAVBackupStore.shared.upload(data)
+                await MainActor.run {
+                    webdavBusy = false
+                    BeansHaptics.success()
+                    ToastCenter.shared.show("已上传到 WebDAV")
+                }
+            } catch {
+                await MainActor.run {
+                    webdavBusy = false
+                    ToastCenter.shared.show("上传失败：\(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    /// 从 WebDAV 下载备份并进入恢复确认
+    private func downloadFromWebDAV() {
+        persistWebDAVConfig()
+        webdavBusy = true
+        Task {
+            do {
+                let data = try await WebDAVBackupStore.shared.download()
+                await MainActor.run {
+                    webdavBusy = false
+                    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                        ToastCenter.shared.show("备份文件解析失败")
+                        return
+                    }
+                    pendingRestore = json
+                    showRestoreConfirm = true
+                }
+            } catch {
+                await MainActor.run {
+                    webdavBusy = false
+                    ToastCenter.shared.show("下载失败：\(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     private static func backupDateString() -> String {
